@@ -22,10 +22,13 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/informers"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	frameworkfake "k8s.io/kubernetes/pkg/scheduler/framework/fake"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
@@ -36,6 +39,7 @@ import (
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
 	koordfake "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned/fake"
 	koordinatorinformers "github.com/koordinator-sh/koordinator/pkg/client/informers/externalversions"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/services"
 	reservationutil "github.com/koordinator-sh/koordinator/pkg/util/reservation"
 )
 
@@ -44,9 +48,12 @@ var (
 	_ framework.FilterPlugin    = &TestTransformer{}
 	_ framework.ScorePlugin     = &TestTransformer{}
 
-	_ PreFilterTransformer = &TestTransformer{}
-	_ FilterTransformer    = &TestTransformer{}
-	_ ScoreTransformer     = &TestTransformer{}
+	_ FindOneNodePluginProvider = &TestTransformer{}
+
+	_ PreFilterTransformer  = &TestTransformer{}
+	_ FilterTransformer     = &TestTransformer{}
+	_ ScoreTransformer      = &TestTransformer{}
+	_ PostFilterTransformer = &TestTransformer{}
 )
 
 type TestTransformer struct {
@@ -77,7 +84,7 @@ func (h *TestTransformer) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
 }
 
-func (h *TestTransformer) AfterPreFilter(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod) *framework.Status {
+func (h *TestTransformer) AfterPreFilter(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, preFilterResult *framework.PreFilterResult) *framework.Status {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
@@ -97,6 +104,19 @@ func (h *TestTransformer) Filter(ctx context.Context, cycleState *framework.Cycl
 	return nil
 }
 
+func (h *TestTransformer) FindOneNodePlugin() FindOneNodePlugin {
+	return h
+}
+
+func (h *TestTransformer) FindOneNode(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, result *framework.PreFilterResult) (string, *framework.Status) {
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations["FindOneNode"] = "FindOneNode"
+	return "", framework.NewStatus(framework.Skip)
+
+}
+
 func (h *TestTransformer) BeforeScore(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodes []*corev1.Node) (*corev1.Pod, []*corev1.Node, bool, *framework.Status) {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
@@ -111,6 +131,13 @@ func (h *TestTransformer) Score(ctx context.Context, state *framework.CycleState
 
 func (h *TestTransformer) ScoreExtensions() framework.ScoreExtensions {
 	return nil
+}
+
+func (h *TestTransformer) AfterPostFilter(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, filteredNodeStatusMap framework.NodeToStatusMap) {
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[fmt.Sprintf("AfterPostFilter-%d", h.index)] = fmt.Sprintf("%d", h.index)
 }
 
 type testPreBindReservationState struct {
@@ -182,6 +209,14 @@ func (c fakeNodeInfoLister) NodeInfos() framework.NodeInfoLister {
 	return c
 }
 
+func (c fakeNodeInfoLister) StorageInfos() framework.StorageInfoLister {
+	return c
+}
+
+func (c fakeNodeInfoLister) IsPVCUsedByPods(key string) bool {
+	return false
+}
+
 func Test_frameworkExtenderImpl_RunPreFilterPlugins(t *testing.T) {
 	tests := []struct {
 		name string
@@ -196,7 +231,17 @@ func Test_frameworkExtenderImpl_RunPreFilterPlugins(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extenderFactory, _ := NewFrameworkExtenderFactory()
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, err := NewFrameworkExtenderFactory(
+				WithServicesEngine(services.NewEngine(gin.New())),
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
+			assert.NoError(t, err)
+			assert.NotNil(t, extenderFactory)
+			assert.Equal(t, koordClientSet, extenderFactory.KoordinatorClientSet())
+			assert.Equal(t, koordSharedInformerFactory, extenderFactory.KoordinatorSharedInformerFactory())
 			registeredPlugins := []schedulertesting.RegisterPluginFunc{
 				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
@@ -207,10 +252,15 @@ func Test_frameworkExtenderImpl_RunPreFilterPlugins(t *testing.T) {
 					return &TestTransformer{name: "T2", index: 2}, nil
 				})),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
 				frameworkruntime.WithSnapshotSharedLister(fakeNodeInfoLister{NodeInfoLister: frameworkfake.NodeInfoLister{}}),
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
 			)
 			assert.NoError(t, err)
 			frameworkExtender := extenderFactory.NewFrameworkExtender(fh)
@@ -222,6 +272,7 @@ func Test_frameworkExtenderImpl_RunPreFilterPlugins(t *testing.T) {
 				"AfterPreFilter-1":  "1",
 				"BeforePreFilter-2": "2",
 				"AfterPreFilter-2":  "2",
+				"FindOneNode":       "FindOneNode",
 			}
 			assert.Equal(t, expectedAnnotations, tt.pod.Annotations)
 		})
@@ -244,7 +295,17 @@ func Test_frameworkExtenderImpl_RunFilterPluginsWithNominatedPods(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extenderFactory, _ := NewFrameworkExtenderFactory()
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, err := NewFrameworkExtenderFactory(
+				WithServicesEngine(services.NewEngine(gin.New())),
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
+			assert.NoError(t, err)
+			assert.NotNil(t, extenderFactory)
+			assert.Equal(t, koordClientSet, extenderFactory.KoordinatorClientSet())
+			assert.Equal(t, koordSharedInformerFactory, extenderFactory.KoordinatorSharedInformerFactory())
 			registeredPlugins := []schedulertesting.RegisterPluginFunc{
 				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
@@ -255,13 +316,25 @@ func Test_frameworkExtenderImpl_RunFilterPluginsWithNominatedPods(t *testing.T) 
 					return &TestTransformer{name: "T2", index: 2}, nil
 				})),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
+				frameworkruntime.WithSnapshotSharedLister(fakeNodeInfoLister{NodeInfoLister: frameworkfake.NodeInfoLister{}}),
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
+				frameworkruntime.WithPodNominator(NewFakePodNominator()),
 			)
 			assert.NoError(t, err)
 			frameworkExtender := extenderFactory.NewFrameworkExtender(fh)
 			frameworkExtender.SetConfiguredPlugins(fh.ListPlugins())
+			tt.nodeInfo.SetNode(&corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node-1",
+				},
+			})
 			assert.Equal(t, tt.want, frameworkExtender.RunFilterPluginsWithNominatedPods(context.TODO(), framework.NewCycleState(), tt.pod, tt.nodeInfo))
 			assert.Len(t, tt.pod.Annotations, 2)
 			expectedAnnotations := map[string]string{
@@ -278,23 +351,44 @@ func Test_frameworkExtenderImpl_RunScorePlugins(t *testing.T) {
 		name       string
 		pod        *corev1.Pod
 		nodes      []*corev1.Node
-		wantScore  framework.PluginToNodeScores
+		wantScore  []framework.NodePluginScores
 		wantStatus *framework.Status
 	}{
 		{
 			name:  "normal RunScorePlugins",
 			pod:   &corev1.Pod{},
 			nodes: []*corev1.Node{{}},
-			wantScore: framework.PluginToNodeScores{
-				"T1": {{Name: "", Score: 0}},
-				"T2": {{Name: "", Score: 0}},
+			wantScore: []framework.NodePluginScores{
+				{
+					Name: "",
+					Scores: []framework.PluginScore{
+						{
+							Name:  "T1",
+							Score: 0,
+						},
+						{
+							Name:  "T2",
+							Score: 0,
+						},
+					},
+				},
 			},
 			wantStatus: nil,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extenderFactory, _ := NewFrameworkExtenderFactory()
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, err := NewFrameworkExtenderFactory(
+				WithServicesEngine(services.NewEngine(gin.New())),
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
+			assert.NoError(t, err)
+			assert.NotNil(t, extenderFactory)
+			assert.Equal(t, koordClientSet, extenderFactory.KoordinatorClientSet())
+			assert.Equal(t, koordSharedInformerFactory, extenderFactory.KoordinatorSharedInformerFactory())
 			registeredPlugins := []schedulertesting.RegisterPluginFunc{
 				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
@@ -305,9 +399,14 @@ func Test_frameworkExtenderImpl_RunScorePlugins(t *testing.T) {
 					return &TestTransformer{name: "T2", index: 2}, nil
 				}), 1),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
 			)
 			assert.NoError(t, err)
 			frameworkExtender := extenderFactory.NewFrameworkExtender(fh)
@@ -324,10 +423,22 @@ func Test_frameworkExtenderImpl_RunScorePlugins(t *testing.T) {
 	}
 }
 
+type fakeMetricsRecorder struct{}
+
+func (f *fakeMetricsRecorder) ObservePluginDurationAsync(extensionPoint, plugin, status string, duration float64) {
+}
+
 func TestPreBind(t *testing.T) {
 	reservation := &schedulingv1alpha1.Reservation{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "fake-reservation",
+		},
+		Spec: schedulingv1alpha1.ReservationSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					SchedulerName: "koord-scheduler",
+				},
+			},
 		},
 	}
 	tests := []struct {
@@ -361,9 +472,14 @@ func TestPreBind(t *testing.T) {
 					return &fakePreBindPlugin{err: errors.New("failed")}, nil
 				}),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
 			)
 			assert.NoError(t, err)
 
@@ -385,10 +501,14 @@ func TestPreBind(t *testing.T) {
 			impl.updatePlugins(&TestTransformer{index: 1})
 			impl.updatePlugins(&TestTransformer{index: 2})
 
-			cycleState := framework.NewCycleState()
+			impl.SharedInformerFactory().Start(nil)
+			impl.KoordinatorSharedInformerFactory().Start(nil)
+			impl.SharedInformerFactory().WaitForCacheSync(nil)
+			impl.KoordinatorSharedInformerFactory().WaitForCacheSync(nil)
 
+			cycleState := framework.NewCycleState()
 			status := extender.RunPreBindPlugins(context.TODO(), cycleState, tt.pod, "test-node-1")
-			assert.Equal(t, tt.wantStatus, status.IsSuccess())
+			assert.Equal(t, tt.wantStatus, status.IsSuccess(), status.Message())
 			if status.IsSuccess() {
 				s, err := cycleState.Read("test-preBind-reservation")
 				assert.NoError(t, err)
@@ -399,6 +519,16 @@ func TestPreBind(t *testing.T) {
 }
 
 func TestPreBindExtensionOrder(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			UID:       "xxx",
+		},
+		Spec: corev1.PodSpec{
+			SchedulerName: "koord-scheduler",
+		},
+	}
 	preBindA := &fakePreBindPlugin{name: "fakePreBindPluginA", skipApplyPatch: true}
 	preBindB := &fakePreBindPlugin{name: "fakePreBindPluginB", appendAnnotations: map[string]string{"test": "2"}}
 	registeredPlugins := []schedulertesting.RegisterPluginFunc{
@@ -411,9 +541,14 @@ func TestPreBindExtensionOrder(t *testing.T) {
 			return preBindB, nil
 		}),
 	}
+	fakeClient := kubefake.NewSimpleClientset(pod)
+	sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 	fh, err := schedulertesting.NewFramework(
+		context.TODO(),
 		registeredPlugins,
 		"koord-scheduler",
+		frameworkruntime.WithClientSet(fakeClient),
+		frameworkruntime.WithInformerFactory(sharedInformerFactory),
 	)
 	assert.NoError(t, err)
 
@@ -430,12 +565,21 @@ func TestPreBindExtensionOrder(t *testing.T) {
 	impl.updatePlugins(preBindA)
 	impl.updatePlugins(preBindB)
 
+	impl.SharedInformerFactory().Start(nil)
+	impl.KoordinatorSharedInformerFactory().Start(nil)
+	impl.SharedInformerFactory().WaitForCacheSync(nil)
+	impl.KoordinatorSharedInformerFactory().WaitForCacheSync(nil)
+
+	got, err := extender.ClientSet().CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.NotNil(t, got)
+	got, err = impl.podLister.Pods(pod.Namespace).Get(pod.Name)
+	assert.NoError(t, err)
+	assert.NotNil(t, got)
+
 	cycleState := framework.NewCycleState()
-
-	pod := &corev1.Pod{}
-
 	status := extender.RunPreBindPlugins(context.TODO(), cycleState, pod, "test-node-1")
-	assert.True(t, status.IsSuccess())
+	assert.True(t, status.IsSuccess(), status.Message())
 	assert.Nil(t, preBindA.modifiedObj)
 	assert.Equal(t, map[string]string{"test": "2"}, preBindB.modifiedObj.GetAnnotations())
 }
@@ -521,13 +665,23 @@ func TestReservationRestorePlugin(t *testing.T) {
 				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
 			)
 			assert.NoError(t, err)
 
-			extenderFactory, _ := NewFrameworkExtenderFactory()
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, _ := NewFrameworkExtenderFactory(
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
 
 			extender := NewFrameworkExtender(extenderFactory, fh)
 			pl := &fakeReservationRestorePlugin{
@@ -568,12 +722,157 @@ func TestReservationRestorePlugin(t *testing.T) {
 				nodeRestoreStates["test-node-1"] = pluginState
 			}
 
+			// TODO: remove deprecated methods
 			status = extender.RunReservationExtensionFinalRestoreReservation(context.TODO(), cycleState, &corev1.Pod{}, pluginToNodeReservationRestoreState)
 			assert.Equal(t, tt.wantStatus2, status.IsSuccess())
 			val, err := cycleState.Read(fakeReservationRestoreStateKey)
 			assert.NoError(t, err)
 			stateData := val.(*fakeReservationRestoreStateData)
 			assert.Equal(t, tt.wantReservation, stateData.m["test-node-1"].(*fakeNodeReservationRestoreStateData).matched[0].Reservation)
+		})
+	}
+}
+
+type fakeNodeReservationPreAllocationRestoreStateData struct {
+	preAllocatable []*corev1.Pod
+}
+
+type fakeReservationPreAllocationRestorePlugin struct {
+	restoreErr    error
+	preRestoreErr error
+}
+
+var _ ReservationPreAllocationRestorePlugin = &fakeReservationPreAllocationRestorePlugin{}
+
+func (f *fakeReservationPreAllocationRestorePlugin) Name() string {
+	return "fakeReservationPreAllocationRestorePlugin"
+}
+
+func (f *fakeReservationPreAllocationRestorePlugin) PreRestoreReservationPreAllocation(ctx context.Context, cycleState *framework.CycleState, r *ReservationInfo) *framework.Status {
+	if f.preRestoreErr != nil {
+		return framework.AsStatus(f.preRestoreErr)
+	}
+	cycleState.Write(fakeReservationRestoreStateKey, &fakeReservationRestoreStateData{})
+	return nil
+}
+
+func (f *fakeReservationPreAllocationRestorePlugin) RestoreReservationPreAllocation(ctx context.Context, cycleState *framework.CycleState, r *ReservationInfo, preAllocatable []*corev1.Pod, nodeInfo *framework.NodeInfo) (interface{}, *framework.Status) {
+	if f.restoreErr != nil {
+		return nil, framework.AsStatus(f.restoreErr)
+	}
+	return &fakeNodeReservationPreAllocationRestoreStateData{
+		preAllocatable: preAllocatable,
+	}, nil
+}
+
+func TestRunReservationExtensionPreRestoreReservationPreAllocation(t *testing.T) {
+	reservation := &schedulingv1alpha1.Reservation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fake-reservation",
+		},
+		Spec: schedulingv1alpha1.ReservationSpec{
+			Template: &corev1.PodTemplateSpec{},
+		},
+	}
+	rInfo := NewReservationInfo(reservation)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fake-pod",
+		},
+	}
+	tests := []struct {
+		name               string
+		rInfo              *ReservationInfo
+		preAllocatable     []*corev1.Pod
+		preRestoreErr      error
+		restoreErr         error
+		wantPreAllocatable []*corev1.Pod
+		wantStatus1        bool
+		wantStatus2        bool
+	}{
+		{
+			name:               "store successfully",
+			rInfo:              rInfo,
+			preAllocatable:     []*corev1.Pod{pod},
+			wantPreAllocatable: []*corev1.Pod{pod},
+			wantStatus1:        true,
+			wantStatus2:        true,
+		},
+		{
+			name:               "pre restore err",
+			rInfo:              rInfo,
+			preAllocatable:     []*corev1.Pod{pod},
+			preRestoreErr:      fmt.Errorf("pre restore err"),
+			wantPreAllocatable: nil,
+			wantStatus1:        false,
+			wantStatus2:        false,
+		},
+		{
+			name:               "restore err",
+			rInfo:              rInfo,
+			preAllocatable:     []*corev1.Pod{pod},
+			restoreErr:         fmt.Errorf("restore err"),
+			wantPreAllocatable: nil,
+			wantStatus1:        true,
+			wantStatus2:        false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registeredPlugins := []schedulertesting.RegisterPluginFunc{
+				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
+				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
+			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
+				registeredPlugins,
+				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
+			)
+			assert.NoError(t, err)
+
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, _ := NewFrameworkExtenderFactory(
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
+
+			extender := NewFrameworkExtender(extenderFactory, fh)
+			pl := &fakeReservationPreAllocationRestorePlugin{
+				preRestoreErr: tt.preRestoreErr,
+				restoreErr:    tt.restoreErr,
+			}
+			impl := extender.(*frameworkExtenderImpl)
+			impl.updatePlugins(pl)
+
+			cycleState := framework.NewCycleState()
+
+			nodeInfo := framework.NewNodeInfo()
+			nodeInfo.SetNode(&corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node-1",
+				},
+			})
+
+			status := extender.RunReservationExtensionPreRestoreReservationPreAllocation(context.TODO(), cycleState, tt.rInfo)
+			assert.Equal(t, tt.wantStatus1, status.IsSuccess())
+			if !tt.wantStatus1 {
+				return
+			}
+			pluginToRestoreState, status := extender.RunReservationExtensionRestoreReservationPreAllocation(context.TODO(), cycleState, tt.rInfo, tt.preAllocatable, nodeInfo)
+			assert.Equal(t, tt.wantStatus2, status.IsSuccess())
+			if !tt.wantStatus2 {
+				return
+			}
+			assert.NotNil(t, pluginToRestoreState)
+			if tt.wantPreAllocatable != nil {
+				assert.NotNil(t, pluginToRestoreState[pl.Name()])
+				assert.Equal(t, tt.wantPreAllocatable, pluginToRestoreState[pl.Name()].(*fakeNodeReservationPreAllocationRestoreStateData).preAllocatable)
+			}
 		})
 	}
 }
@@ -585,7 +884,18 @@ type fakeReservationFilterPlugin struct {
 
 func (f *fakeReservationFilterPlugin) Name() string { return "fakeReservationFilterPlugin" }
 
-func (f *fakeReservationFilterPlugin) FilterReservation(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, reservationInfo *ReservationInfo, nodeName string) *framework.Status {
+func (f *fakeReservationFilterPlugin) FilterReservation(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, reservationInfo *ReservationInfo, nodeInfo *framework.NodeInfo) *framework.Status {
+	if reservationInfo.Reservation.Annotations == nil {
+		reservationInfo.Reservation.Annotations = map[string]string{}
+	}
+	reservationInfo.Reservation.Annotations[fmt.Sprintf("reservationFilterWithPlugin-%d", f.index)] = fmt.Sprintf("%d", f.index)
+	if f.err != nil {
+		return framework.AsStatus(f.err)
+	}
+	return nil
+}
+
+func (f *fakeReservationFilterPlugin) FilterNominateReservation(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, reservationInfo *ReservationInfo, nodeName string) *framework.Status {
 	if reservationInfo.Reservation.Annotations == nil {
 		reservationInfo.Reservation.Annotations = map[string]string{}
 	}
@@ -596,7 +906,96 @@ func (f *fakeReservationFilterPlugin) FilterReservation(ctx context.Context, cyc
 	return nil
 }
 
-func TestReservationFilterPlugin(t *testing.T) {
+func TestRunReservationFilterPlugins(t *testing.T) {
+	testNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node-1",
+		},
+	}
+	testNodeInfo := framework.NewNodeInfo()
+	testNodeInfo.SetNode(testNode)
+	tests := []struct {
+		name            string
+		reservation     *schedulingv1alpha1.Reservation
+		plugins         []*fakeReservationFilterPlugin
+		wantAnnotations map[string]string
+		wantStatus      bool
+	}{
+		{
+			name: "filter reservation succeeded",
+			reservation: &schedulingv1alpha1.Reservation{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-reservation",
+				},
+			},
+			plugins: []*fakeReservationFilterPlugin{
+				{index: 1},
+				{index: 2},
+			},
+			wantAnnotations: map[string]string{
+				"reservationFilterWithPlugin-1": "1",
+				"reservationFilterWithPlugin-2": "2",
+			},
+			wantStatus: true,
+		},
+		{
+			name: "first plugin failed",
+			reservation: &schedulingv1alpha1.Reservation{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-reservation",
+				},
+			},
+			plugins: []*fakeReservationFilterPlugin{
+				{index: 1, err: errors.New("failed")},
+				{index: 2},
+			},
+			wantAnnotations: map[string]string{
+				"reservationFilterWithPlugin-1": "1",
+			},
+			wantStatus: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registeredPlugins := []schedulertesting.RegisterPluginFunc{
+				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
+				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
+			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
+				registeredPlugins,
+				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
+			)
+			assert.NoError(t, err)
+
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, _ := NewFrameworkExtenderFactory(
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
+
+			extender := NewFrameworkExtender(extenderFactory, fh)
+			impl := extender.(*frameworkExtenderImpl)
+			for _, pl := range tt.plugins {
+				impl.updatePlugins(pl)
+			}
+
+			cycleState := framework.NewCycleState()
+
+			reservationInfo := NewReservationInfo(tt.reservation)
+			status := extender.RunReservationFilterPlugins(context.TODO(), cycleState, &corev1.Pod{}, reservationInfo, testNodeInfo)
+			assert.Equal(t, tt.wantStatus, status.IsSuccess())
+			assert.Equal(t, tt.wantAnnotations, reservationInfo.Reservation.Annotations)
+		})
+	}
+}
+
+func TestRunNominateReservationFilterPlugins(t *testing.T) {
 	tests := []struct {
 		name            string
 		reservation     *schedulingv1alpha1.Reservation
@@ -644,13 +1043,23 @@ func TestReservationFilterPlugin(t *testing.T) {
 				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
 			)
 			assert.NoError(t, err)
 
-			extenderFactory, _ := NewFrameworkExtenderFactory()
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, _ := NewFrameworkExtenderFactory(
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
 
 			extender := NewFrameworkExtender(extenderFactory, fh)
 			impl := extender.(*frameworkExtenderImpl)
@@ -661,7 +1070,7 @@ func TestReservationFilterPlugin(t *testing.T) {
 			cycleState := framework.NewCycleState()
 
 			reservationInfo := NewReservationInfo(tt.reservation)
-			status := extender.RunReservationFilterPlugins(context.TODO(), cycleState, &corev1.Pod{}, reservationInfo, "test-node-1")
+			status := extender.RunNominateReservationFilterPlugins(context.TODO(), cycleState, &corev1.Pod{}, reservationInfo, "test-node-1")
 			assert.Equal(t, tt.wantStatus, status.IsSuccess())
 			assert.Equal(t, tt.wantAnnotations, reservationInfo.Reservation.Annotations)
 		})
@@ -674,6 +1083,7 @@ type fakeReservationScorePlugin struct {
 	err    error
 
 	enableNormalization bool
+	isPreAllocation     bool
 }
 
 func (f *fakeReservationScorePlugin) Name() string { return f.name }
@@ -682,6 +1092,9 @@ func (f *fakeReservationScorePlugin) ScoreReservation(ctx context.Context, cycle
 	var status *framework.Status
 	if f.err != nil {
 		status = framework.AsStatus(f.err)
+	}
+	if f.isPreAllocation {
+		return f.scores[pod.GetName()], status
 	}
 	return f.scores[reservationInfo.GetName()], status
 }
@@ -796,13 +1209,23 @@ func TestReservationScorePlugin(t *testing.T) {
 				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
 			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
 				registeredPlugins,
 				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
 			)
 			assert.NoError(t, err)
 
-			extenderFactory, _ := NewFrameworkExtenderFactory()
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, _ := NewFrameworkExtenderFactory(
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
 
 			extender := NewFrameworkExtender(extenderFactory, fh)
 			impl := extender.(*frameworkExtenderImpl)
@@ -818,6 +1241,147 @@ func TestReservationScorePlugin(t *testing.T) {
 			}
 
 			pluginToReservationScores, status := extender.RunReservationScorePlugins(context.TODO(), cycleState, &corev1.Pod{}, rInfos, "test-node-1")
+			assert.Equal(t, tt.wantStatus, status.IsSuccess())
+			assert.Equal(t, tt.wantScores, pluginToReservationScores)
+		})
+	}
+}
+
+func TestRunReservationPreAllocationScorePlugins(t *testing.T) {
+	testRInfo := NewReservationInfo(&schedulingv1alpha1.Reservation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-reservation-1",
+		},
+	})
+	tests := []struct {
+		name       string
+		pods       []*corev1.Pod
+		plugins    []*fakeReservationScorePlugin
+		wantScores PluginToReservationScores
+		wantStatus bool
+	}{
+		{
+			name: "normal score",
+			pods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pod-1",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pod-2",
+					},
+				},
+			},
+			plugins: []*fakeReservationScorePlugin{
+				{
+					name: "pl-1", scores: map[string]int64{
+						"test-pod-1": 1,
+						"test-pod-2": 1,
+					},
+					isPreAllocation: true,
+				},
+				{
+					name: "pl-2", scores: map[string]int64{
+						"test-pod-1": 2,
+						"test-pod-2": 2,
+					},
+					isPreAllocation: true,
+				},
+			},
+			wantScores: PluginToReservationScores{
+				"pl-1": {
+					{Name: "test-pod-1", Score: 1},
+					{Name: "test-pod-2", Score: 1},
+				},
+				"pl-2": {
+					{Name: "test-pod-1", Score: 2},
+					{Name: "test-pod-2", Score: 2},
+				},
+			},
+			wantStatus: true,
+		},
+		{
+			name: "normalize score",
+			pods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pod-1",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pod-2",
+					},
+				},
+			},
+			plugins: []*fakeReservationScorePlugin{
+				{
+					name: "pl-1",
+					scores: map[string]int64{
+						"test-pod-1": 100,
+						"test-pod-2": 200,
+					},
+					enableNormalization: true,
+					isPreAllocation:     true,
+				},
+				{
+					name: "pl-2",
+					scores: map[string]int64{
+						"test-pod-1": 100,
+						"test-pod-2": 50,
+					},
+					enableNormalization: true,
+					isPreAllocation:     true,
+				},
+			},
+			wantScores: PluginToReservationScores{
+				"pl-1": {
+					{Name: "test-pod-1", Score: 50},
+					{Name: "test-pod-2", Score: 100},
+				},
+				"pl-2": {
+					{Name: "test-pod-1", Score: 100},
+					{Name: "test-pod-2", Score: 50},
+				},
+			},
+			wantStatus: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registeredPlugins := []schedulertesting.RegisterPluginFunc{
+				schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
+				schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
+			}
+			fakeClient := kubefake.NewSimpleClientset()
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			fh, err := schedulertesting.NewFramework(
+				context.TODO(),
+				registeredPlugins,
+				"koord-scheduler",
+				frameworkruntime.WithClientSet(fakeClient),
+				frameworkruntime.WithInformerFactory(sharedInformerFactory),
+			)
+			assert.NoError(t, err)
+
+			koordClientSet := koordfake.NewSimpleClientset()
+			koordSharedInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordClientSet, 0)
+			extenderFactory, _ := NewFrameworkExtenderFactory(
+				WithKoordinatorClientSet(koordClientSet),
+				WithKoordinatorSharedInformerFactory(koordSharedInformerFactory),
+			)
+
+			extender := NewFrameworkExtender(extenderFactory, fh)
+			impl := extender.(*frameworkExtenderImpl)
+			for _, pl := range tt.plugins {
+				impl.updatePlugins(pl)
+			}
+
+			cycleState := framework.NewCycleState()
+
+			pluginToReservationScores, status := extender.RunReservationPreAllocationScorePlugins(context.TODO(), cycleState, testRInfo, tt.pods, "test-node-1")
 			assert.Equal(t, tt.wantStatus, status.IsSuccess())
 			assert.Equal(t, tt.wantScores, pluginToReservationScores)
 		})

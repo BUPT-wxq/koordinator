@@ -57,20 +57,76 @@ const (
 	//
 	// ResizePod is used to enable resize pod feature
 	ResizePod featuregate.Feature = "ResizePod"
+
+	// owner: @saintube @ZiMengSheng
+	// alpha: v1.5
+	//
+	// LazyReservationRestore is used to restore reserved resources lazily to improve the scheduling performance.
+	LazyReservationRestore featuregate.Feature = "LazyReservationRestore"
+
+	// owner: @saintube @ZiMengSheng
+	// alpha: v1.6
+	//
+	// OmitNodeLabelsForReservation is used to omit node labels while matching reservation affinity.
+	OmitNodeLabelsForReservation featuregate.Feature = "OmitNodeLabelsForReservation"
+
+	// owner: @saintube @ZiMengSheng
+	// alpha: v1.7
+	//
+	// SkipReservationFitsNode is used to skip reservation fits node when the logic is repeated by NodeResourceFits.
+	SkipReservationFitsNode featuregate.Feature = "SkipReservationFitsNode"
+
+	// owner: @zqzten
+	// alpha: v1.7
+	//
+	// DevicePluginAdaption enables adaption for third party device plugins within device share scheduling.
+	DevicePluginAdaption featuregate.Feature = "DevicePluginAdaption"
+
+	// owner: @saintube
+	// alpha: v1.7
+	//
+	// CleanExpiredReservationAllocated is used to clean expired reservation allocated annotations of pods.
+	CleanExpiredReservationAllocated featuregate.Feature = "CleanExpiredReservationAllocated"
+
+	// owner: @saintube @ZiMengSheng
+	// alpha: v1.7
+	//
+	// DynamicSchedulerCheck is used to check the scheduler name when a pod or a reservation can change it dynamically.
+	DynamicSchedulerCheck featuregate.Feature = "DynamicSchedulerCheck"
+
+	CSIStorageCapacity featuregate.Feature = "CSIStorageCapacity"
+
+	GenericEphemeralVolume featuregate.Feature = "GenericEphemeralVolume"
+
+	PodDisruptionBudget featuregate.Feature = "PodDisruptionBudget"
 )
 
 var defaultSchedulerFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-	CompatibleCSIStorageCapacity:       {Default: false, PreRelease: featuregate.Alpha},
-	DisableCSIStorageCapacityInformer:  {Default: false, PreRelease: featuregate.Alpha},
-	CompatiblePodDisruptionBudget:      {Default: false, PreRelease: featuregate.Alpha},
-	DisablePodDisruptionBudgetInformer: {Default: false, PreRelease: featuregate.Alpha},
-	ResizePod:                          {Default: false, PreRelease: featuregate.Alpha},
-	MultiQuotaTree:                     {Default: false, PreRelease: featuregate.Alpha},
-	ElasticQuotaIgnorePodOverhead:      {Default: false, PreRelease: featuregate.Alpha},
-	ElasticQuotaGuaranteeUsage:         {Default: false, PreRelease: featuregate.Alpha},
-	DisableDefaultQuota:                {Default: false, PreRelease: featuregate.Alpha},
+	CompatibleCSIStorageCapacity:              {Default: false, PreRelease: featuregate.Alpha},
+	DisableCSIStorageCapacityInformer:         {Default: false, PreRelease: featuregate.Alpha},
+	CompatiblePodDisruptionBudget:             {Default: false, PreRelease: featuregate.Alpha},
+	DisablePodDisruptionBudgetInformer:        {Default: false, PreRelease: featuregate.Alpha},
+	ResizePod:                                 {Default: false, PreRelease: featuregate.Alpha},
+	MultiQuotaTree:                            {Default: false, PreRelease: featuregate.Alpha},
+	ElasticQuotaIgnorePodOverhead:             {Default: false, PreRelease: featuregate.Alpha},
+	ElasticQuotaIgnoreTerminatingPod:          {Default: false, PreRelease: featuregate.Alpha},
+	ElasticQuotaImmediateIgnoreTerminatingPod: {Default: false, PreRelease: featuregate.Alpha},
+	ElasticQuotaGuaranteeUsage:                {Default: false, PreRelease: featuregate.Alpha},
+	DisableDefaultQuota:                       {Default: false, PreRelease: featuregate.Alpha},
+	SupportParentQuotaSubmitPod:               {Default: false, PreRelease: featuregate.Alpha},
+	LazyReservationRestore:                    {Default: false, PreRelease: featuregate.Alpha},
+	OmitNodeLabelsForReservation:              {Default: false, PreRelease: featuregate.Alpha},
+	SkipReservationFitsNode:                   {Default: false, PreRelease: featuregate.Alpha},
+	DevicePluginAdaption:                      {Default: false, PreRelease: featuregate.Alpha},
+	CleanExpiredReservationAllocated:          {Default: false, PreRelease: featuregate.Alpha},
+	DynamicSchedulerCheck:                     {Default: true, PreRelease: featuregate.Alpha}, // enabled by default
+	CSIStorageCapacity:                        {Default: true, PreRelease: featuregate.GA},    // remove in 1.26
+	GenericEphemeralVolume:                    {Default: true, PreRelease: featuregate.GA},
+	PodDisruptionBudget:                       {Default: true, PreRelease: featuregate.GA},
 }
 
 func init() {
 	runtime.Must(k8sfeature.DefaultMutableFeatureGate.Add(defaultSchedulerFeatureGates))
+	// TODO: use a unified feature-gate
+	runtime.Must(k8sfeature.DefaultMutableFeatureGate.Add(transformerFeatureGates))
 }

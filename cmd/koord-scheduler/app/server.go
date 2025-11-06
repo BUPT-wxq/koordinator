@@ -23,8 +23,10 @@ import (
 	"net/http"
 	"os"
 	goruntime "runtime"
+	"time"
 
 	"github.com/spf13/cobra"
+
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
@@ -45,7 +47,10 @@ import (
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/configz"
 	"k8s.io/component-base/logs"
+	logsapi "k8s.io/component-base/logs/api/v1"
+	"k8s.io/component-base/metrics/features"
 	"k8s.io/component-base/metrics/legacyregistry"
+	"k8s.io/component-base/metrics/prometheus/slis"
 	"k8s.io/component-base/term"
 	"k8s.io/component-base/version"
 	"k8s.io/component-base/version/verflag"
@@ -63,14 +68,18 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/defaultprofile"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/eventhandlers"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/informer"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/networktopology"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/services"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/metrics"
 	"github.com/koordinator-sh/koordinator/pkg/util/asynclog"
 	utilroutes "github.com/koordinator-sh/koordinator/pkg/util/routes"
 	"github.com/koordinator-sh/koordinator/pkg/util/transformer"
 )
 
 func init() {
-	utilruntime.Must(logs.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
+	utilruntime.Must(logsapi.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
+	utilruntime.Must(features.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
 }
 
 // Option configures a framework.Registry.
@@ -118,7 +127,7 @@ for cost reduction and efficiency enhancement.
 	cliflag.SetUsageAndHelpFunc(cmd, *nfs, cols)
 
 	if err := cmd.MarkFlagFilename("config", "yaml", "yml", "json"); err != nil {
-		klog.ErrorS(err, "Failed to mark flag filename")
+		klog.Background().Error(err, "Failed to mark flag filename")
 	}
 
 	return cmd
@@ -133,7 +142,7 @@ func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Op
 
 	// Activate logging as soon as possible, after that
 	// show flags with the final logging configuration.
-	if err := opts.Logs.ValidateAndApply(utilfeature.DefaultFeatureGate); err != nil {
+	if err := logsapi.ValidateAndApply(opts.Logs, utilfeature.DefaultFeatureGate); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
@@ -147,20 +156,22 @@ func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Op
 		cancel()
 	}()
 
-	cc, sched, extendedHandle, err := Setup(ctx, opts, registryOptions...)
+	cc, sched, extendedHandle, customWorkflow, err := Setup(ctx, opts, registryOptions...)
 	if err != nil {
 		return err
 	}
-
-	return Run(ctx, cc, sched, extendedHandle)
+	// add feature enablement metrics
+	utilfeature.DefaultMutableFeatureGate.AddMetrics()
+	return Run(ctx, cc, sched, extendedHandle, customWorkflow)
 }
 
 // Run executes the scheduler based on the given configuration. It only returns on error or when context is done.
-func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *scheduler.Scheduler, extenderFactory *frameworkext.FrameworkExtenderFactory) error {
+func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *scheduler.Scheduler, extenderFactory *frameworkext.FrameworkExtenderFactory, customWorkflow CustomWorkflow) error {
+	logger := klog.FromContext(ctx)
 	// To help debugging, immediately log version
-	klog.V(1).InfoS("Starting Koordinator Scheduler version", "version", version.Get())
+	logger.Info("Starting Koordinator Scheduler version", "version", version.Get())
 
-	klog.InfoS("Golang settings", "GOGC", os.Getenv("GOGC"), "GOMAXPROCS", os.Getenv("GOMAXPROCS"), "GOTRACEBACK", os.Getenv("GOTRACEBACK"))
+	logger.Info("Golang settings", "GOGC", os.Getenv("GOGC"), "GOMAXPROCS", os.Getenv("GOMAXPROCS"), "GOTRACEBACK", os.Getenv("GOTRACEBACK"))
 
 	// Configz registration.
 	if cz, err := configz.New("componentconfig"); err == nil {
@@ -169,8 +180,9 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		return fmt.Errorf("unable to register configz: %s", err)
 	}
 
-	// Prepare the event broadcaster.
+	// Start events processing pipeline.
 	cc.EventBroadcaster.StartRecordingToSink(ctx.Done())
+	defer cc.EventBroadcaster.Shutdown()
 
 	// Setup healthz checks.
 	var checks []healthz.HealthChecker
@@ -191,54 +203,82 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 	}
 
 	// Start up the healthz server.
+	gracefulShutdownSecureServer := func() {}
 	if cc.InsecureServing != nil {
-		handler := buildHandlerChain(newAPIHandler(&cc.ComponentConfig, cc.InformerFactory, cc.ServicesEngine, sched, isLeader, false, checks...), nil, nil)
+		handler := buildHandlerChain(newHealthzAndMetricsHandler(&cc.ComponentConfig, cc.InformerFactory, cc.ServicesEngine, sched, isLeader, checks...), nil, nil)
 		if err := cc.InsecureServing.Serve(handler, 0, ctx.Done()); err != nil {
 			return fmt.Errorf("failed to start insecure server: %v", err)
 		}
 	}
 	if cc.SecureServing != nil {
-		handler := buildHandlerChain(newAPIHandler(&cc.ComponentConfig, cc.InformerFactory, cc.ServicesEngine, sched, isLeader, false, checks...), cc.Authentication.Authenticator, cc.Authorization.Authorizer)
-		// TODO: handle stoppedCh and listenerStoppedCh returned by c.SecureServing.Serve
-		if _, _, err := cc.SecureServing.Serve(handler, 0, ctx.Done()); err != nil {
+		handler := buildHandlerChain(newHealthzAndMetricsHandler(&cc.ComponentConfig, cc.InformerFactory, cc.ServicesEngine, sched, isLeader, checks...), cc.Authentication.Authenticator, cc.Authorization.Authorizer)
+		internalStopCh := make(chan struct{})
+		shutdownTimeout := 5 * time.Second
+		stoppedCh, listenerStoppedCh, err := cc.SecureServing.Serve(handler, shutdownTimeout, internalStopCh)
+		if err != nil {
 			// fail early for secure handlers, removing the old error loop from above
+			close(internalStopCh)
 			return fmt.Errorf("failed to start secure server: %v", err)
+		}
+		gracefulShutdownSecureServer = func() {
+			close(internalStopCh)
+			<-listenerStoppedCh
+			klog.Info("[graceful-termination] secure server has stopped listening")
+			<-stoppedCh
+			klog.Info("[graceful-termination] secure server is exiting")
 		}
 	}
 
-	// Start all informers.
-	cc.InformerFactory.Start(ctx.Done())
-	// DynInformerFactory can be nil in tests.
-	if cc.DynInformerFactory != nil {
-		cc.DynInformerFactory.Start(ctx.Done())
-	}
-	cc.KoordinatorSharedInformerFactory.Start(ctx.Done())
+	startInformersAndWaitForSync := func(ctx context.Context) {
+		// Start all informers.
+		cc.InformerFactory.Start(ctx.Done())
+		// DynInformerFactory can be nil in tests.
+		if cc.DynInformerFactory != nil {
+			cc.DynInformerFactory.Start(ctx.Done())
+		}
+		cc.KoordinatorSharedInformerFactory.Start(ctx.Done())
 
-	// Wait for all caches to sync before scheduling.
-	cc.InformerFactory.WaitForCacheSync(ctx.Done())
-	// DynInformerFactory can be nil in tests.
-	if cc.DynInformerFactory != nil {
-		cc.DynInformerFactory.WaitForCacheSync(ctx.Done())
-	}
-	cc.KoordinatorSharedInformerFactory.WaitForCacheSync(ctx.Done())
+		// Wait for all caches to sync before scheduling.
+		cc.InformerFactory.WaitForCacheSync(ctx.Done())
+		// DynInformerFactory can be nil in tests.
+		if cc.DynInformerFactory != nil {
+			cc.DynInformerFactory.WaitForCacheSync(ctx.Done())
+		}
+		cc.KoordinatorSharedInformerFactory.WaitForCacheSync(ctx.Done())
 
+		// Wait for all handlers to sync (all items in the initial list delivered) before scheduling.
+		if err := sched.WaitForHandlersSync(ctx); err != nil {
+			logger.Error(err, "waiting for handlers to sync")
+		}
+
+		logger.V(3).Info("Handlers synced")
+	}
+	if !cc.ComponentConfig.DelayCacheUntilActive || cc.LeaderElection == nil {
+		startInformersAndWaitForSync(ctx)
+	}
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
 	if cc.LeaderElection != nil {
 		cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				close(waitingForLeader)
-				go extenderFactory.Run()
-				sched.Run(ctx)
+				if cc.ComponentConfig.DelayCacheUntilActive {
+					logger.Info("Starting informers and waiting for sync...")
+					startInformersAndWaitForSync(ctx)
+					logger.Info("Sync completed")
+				}
+				extenderFactory.Run(ctx)
+				RunWorkflow(ctx, sched, customWorkflow)
 			},
 			OnStoppedLeading: func() {
+				gracefulShutdownSecureServer()
 				select {
 				case <-ctx.Done():
 					// We were asked to terminate. Exit 0.
-					klog.InfoS("Requested to terminate, exiting")
+					logger.Info("Requested to terminate, exiting")
 					os.Exit(0)
 				default:
 					// We lost the lock.
-					klog.ErrorS(nil, "Leaderelection lost")
+					logger.Error(nil, "Leaderelection lost")
 					klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 					asynclog.FlushAndExit()
 				}
@@ -256,8 +296,9 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 
 	// Leader election is disabled, so runCommand inline until done.
 	close(waitingForLeader)
-	go extenderFactory.Run()
-	sched.Run(ctx)
+	extenderFactory.Run(ctx)
+	RunWorkflow(ctx, sched, customWorkflow)
+	gracefulShutdownSecureServer()
 	return fmt.Errorf("finished without leader elect")
 }
 
@@ -289,30 +330,26 @@ func installMetricHandler(pathRecorderMux *mux.PathRecorderMux, informers inform
 	})
 }
 
-func installProfilingHandler(pathRecorderMux *mux.PathRecorderMux, enableContentionProfiling bool) {
-	routes.Profiling{}.Install(pathRecorderMux)
-	if enableContentionProfiling {
-		goruntime.SetBlockProfileRate(1)
-	}
-	// NOTE: Use utilroutes.DebugFlags instead of k8s.io/apiserver/pkg/server/routes.DebugFlags
-	//  as using the latter will print a useless stack when installing multiple flags
-	debugFlags := utilroutes.NewDebugFlags(pathRecorderMux)
-	debugFlags.Install("v", utilroutes.StringFlagPutHandler(logs.GlogSetter))
-	debugFlags.Install("s", utilroutes.StringFlagPutHandler(frameworkext.DebugScoresSetter))
-	debugFlags.Install("f", utilroutes.StringFlagPutHandler(frameworkext.DebugFiltersSetter))
-}
-
-// newAPIHandler creates a healthz server from the config, and will also
-// embed the metrics handler if the healthz and metrics address configurations
-// are the same.
-func newAPIHandler(config *kubeschedulerconfig.KubeSchedulerConfiguration, informers informers.SharedInformerFactory, engine *services.Engine, sched *scheduler.Scheduler, isLeader func() bool, separateMetrics bool, checks ...healthz.HealthChecker) http.Handler {
+// newHealthzAndMetricsHandler creates a healthz server from the config, and will also
+// embed the metrics handler.
+func newHealthzAndMetricsHandler(config *kubeschedulerconfig.KubeSchedulerConfiguration, informers informers.SharedInformerFactory, engine *services.Engine, sched *scheduler.Scheduler, isLeader func() bool, checks ...healthz.HealthChecker) http.Handler {
 	pathRecorderMux := mux.NewPathRecorderMux("koord-scheduler")
 	healthz.InstallHandler(pathRecorderMux, checks...)
-	if !separateMetrics {
-		installMetricHandler(pathRecorderMux, informers, isLeader)
+	installMetricHandler(pathRecorderMux, informers, isLeader)
+	if utilfeature.DefaultFeatureGate.Enabled(features.ComponentSLIs) {
+		slis.SLIMetricsWithReset{}.Install(pathRecorderMux)
 	}
 	if config.EnableProfiling {
-		installProfilingHandler(pathRecorderMux, config.EnableContentionProfiling)
+		routes.Profiling{}.Install(pathRecorderMux)
+		if config.EnableContentionProfiling {
+			goruntime.SetBlockProfileRate(1)
+		}
+		debugFlags := utilroutes.NewDebugFlags(pathRecorderMux)
+		debugFlags.Install("v", utilroutes.StringFlagPutHandler(logs.GlogSetter))
+		debugFlags.Install("s", utilroutes.StringFlagPutHandler(frameworkext.DebugScoresSetter))
+		debugFlags.Install("f", utilroutes.StringFlagPutHandler(frameworkext.DebugFiltersSetter))
+		debugFlags.Install("d", utilroutes.StringFlagPutHandler(frameworkext.DumpDiagnosisSetter))
+		debugFlags.Install("db", utilroutes.StringFlagPutHandler(frameworkext.DumpDiagnosisBlockingSetter))
 	}
 	services.InstallAPIHandler(pathRecorderMux, engine, sched, isLeader)
 	return pathRecorderMux
@@ -333,20 +370,20 @@ func WithPlugin(name string, factory runtime.PluginFactory) Option {
 }
 
 // Setup creates a completed config and a scheduler based on the command args and options
-func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions ...Option) (*schedulerserverconfig.CompletedConfig, *scheduler.Scheduler, *frameworkext.FrameworkExtenderFactory, error) {
+func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions ...Option) (*schedulerserverconfig.CompletedConfig, *scheduler.Scheduler, *frameworkext.FrameworkExtenderFactory, CustomWorkflow, error) {
 	if cfg, err := latest.Default(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	} else {
 		opts.ComponentConfig = cfg
 	}
 
 	if errs := opts.Validate(); len(errs) > 0 {
-		return nil, nil, nil, utilerrors.NewAggregate(errs)
+		return nil, nil, nil, nil, utilerrors.NewAggregate(errs)
 	}
 
-	c, err := opts.Config()
+	c, err := opts.Config(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Get the completed config
@@ -354,8 +391,12 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 
 	defaultprofile.AppendDefaultPlugins(cc.ComponentConfig.Profiles)
 
-	frameworkext.SetupCustomInformers(cc.InformerFactory)
+	informer.SetupCustomInformers(cc.InformerFactory)
 	transformer.SetupTransformers(cc.InformerFactory, cc.KoordinatorSharedInformerFactory)
+
+	metrics.Register()
+
+	networkTopologyManager := networktopology.NewTreeManager(cc.KoordinatorSharedInformerFactory, cc.InformerFactory, cc.KoordinatorClient)
 
 	// NOTE(joseph): K8s scheduling framework does not provide extension point for initialization.
 	// Currently, only by copying the initialization code and implementing custom initialization.
@@ -363,26 +404,27 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 		frameworkext.WithServicesEngine(cc.ServicesEngine),
 		frameworkext.WithKoordinatorClientSet(cc.KoordinatorClient),
 		frameworkext.WithKoordinatorSharedInformerFactory(cc.KoordinatorSharedInformerFactory),
+		frameworkext.WithNetworkTopologyManager(networkTopologyManager),
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	outOfTreeRegistry := make(runtime.Registry)
 	for _, option := range outOfTreeRegistryOptions {
 		if err := option(frameworkExtenderFactory, outOfTreeRegistry); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 
 	recorderFactory := getRecorderFactory(&cc)
 	completedProfiles := make([]kubeschedulerconfig.KubeSchedulerProfile, 0)
 	// Create the scheduler.
-	sched, err := scheduler.New(cc.Client,
+	sched, err := scheduler.New(ctx,
+		cc.Client,
 		cc.InformerFactory,
 		cc.DynInformerFactory,
 		recorderFactory,
-		ctx.Done(),
 		scheduler.WithComponentConfigVersion(cc.ComponentConfig.TypeMeta.APIVersion),
 		scheduler.WithKubeConfig(cc.KubeConfig),
 		scheduler.WithProfiles(cc.ComponentConfig.Profiles...),
@@ -399,10 +441,10 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 		}),
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	if err := scheduleroptions.LogOrWriteConfig(opts.WriteConfigTo, &cc.ComponentConfig, completedProfiles); err != nil {
-		return nil, nil, nil, err
+	if err := scheduleroptions.LogOrWriteConfig(klog.FromContext(ctx), opts.WriteConfigTo, &cc.ComponentConfig, completedProfiles); err != nil {
+		return nil, nil, nil, nil, err
 	}
 
 	// extend framework to hook run plugin functions
@@ -418,7 +460,7 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 	frameworkExtenderFactory.InitScheduler(&frameworkext.SchedulerAdapter{Scheduler: sched})
 	schedAdapter := frameworkExtenderFactory.Scheduler()
 
-	eventhandlers.AddScheduleEventHandler(sched, schedAdapter, frameworkExtenderFactory.KoordinatorSharedInformerFactory())
+	eventhandlers.AddScheduleEventHandler(sched, schedAdapter, cc.InformerFactory, cc.KoordinatorSharedInformerFactory)
 	reservationErrorHandler := eventhandlers.MakeReservationErrorHandler(
 		sched,
 		schedAdapter,
@@ -427,5 +469,22 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 	)
 	frameworkExtenderFactory.RegisterErrorHandlerFilters(reservationErrorHandler, nil)
 
-	return &cc, sched, frameworkExtenderFactory, nil
+	for _, wf := range KnownWorkflowList {
+		if wf.IsEnabled() {
+			err = wf.Setup(ctx, &CustomWorkflowOptions{
+				Sched:                      sched,
+				SharedInformerFactory:      cc.InformerFactory,
+				KubeClient:                 cc.Client,
+				KoordSharedInformerFactory: cc.KoordinatorSharedInformerFactory,
+				KoordClient:                cc.KoordinatorClient,
+				RecorderFactory:            recorderFactory,
+			})
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			return &cc, sched, frameworkExtenderFactory, wf, nil
+		}
+	}
+
+	return &cc, sched, frameworkExtenderFactory, nil, nil
 }

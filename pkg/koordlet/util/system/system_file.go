@@ -26,20 +26,22 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/errors"
 	utilsysctl "k8s.io/component-helpers/node/util/sysctl"
 	"k8s.io/klog/v2"
 )
 
 const (
-	ProcStatName          = "stat"
-	ProcMemInfoName       = "meminfo"
 	SysctlSubDir          = "sys"
-	ProcCPUInfoName       = "cpuinfo"
 	KernelCmdlineFileName = "cmdline"
+	HugepageDir           = "hugepages"
+	nrPath                = "nr_hugepages"
 
-	KernelSchedGroupIdentityEnable = "kernel/sched_group_identity_enabled"
+	KernelSchedGroupIdentityEnable = SysKernelRelativePath + SchedGroupIdentityEnabledFileName
+	KernelSchedCore                = SysKernelRelativePath + SchedCoreFileName
 
-	SysNUMASubDir = "bus/node/devices"
+	SysNUMASubDir   = "bus/node/devices"
+	SysPCIDeviceDir = "bus/pci/devices"
 
 	SysCPUSMTActiveSubPath       = "devices/system/cpu/smt/active"
 	SysIntelPStateNoTurboSubPath = "devices/system/cpu/intel_pstate/no_turbo"
@@ -50,19 +52,12 @@ var (
 	Jiffies = float64(10 * time.Millisecond)
 )
 
-func init() {
-	// $ getconf CLK_TCK > jiffies
-	if err := initJiffies(); err != nil {
-		klog.Warningf("failed to get Jiffies, use the default %v, err: %v", Jiffies, err)
-	}
-}
-
 // initJiffies use command "getconf CLK_TCK" to fetch the clock tick on current host,
 // if the command doesn't exist, uses the default value 10ms for jiffies
 func initJiffies() error {
 	getconf, err := exec.LookPath("getconf")
 	if err != nil {
-		return nil
+		return err
 	}
 	cmd := exec.Command(getconf, "CLK_TCK")
 	var out bytes.Buffer
@@ -82,14 +77,6 @@ func GetPeriodTicks(start, end time.Time) float64 {
 	return float64(end.Sub(start)) / Jiffies
 }
 
-func GetProcFilePath(procRelativePath string) string {
-	return filepath.Join(Conf.ProcRootDir, procRelativePath)
-}
-
-func GetProcRootDir() string {
-	return Conf.ProcRootDir
-}
-
 func GetSysRootDir() string {
 	return Conf.SysRootDir
 }
@@ -100,6 +87,14 @@ func GetSysNUMADir() string {
 
 func GetNUMAMemInfoPath(numaNodeSubDir string) string {
 	return filepath.Join(Conf.SysRootDir, SysNUMASubDir, numaNodeSubDir, ProcMemInfoName)
+}
+
+func GetNUMAHugepagesDir(numaNodeSubDir string) string {
+	return filepath.Join(Conf.SysRootDir, SysNUMASubDir, numaNodeSubDir, HugepageDir)
+}
+
+func GetNUMAHugepagesNrPath(numaNodeSubDir string, page string) string {
+	return filepath.Join(Conf.SysRootDir, SysNUMASubDir, numaNodeSubDir, HugepageDir, page, nrPath)
 }
 
 func GetCPUInfoPath() string {
@@ -117,6 +112,8 @@ func GetSysIntelPStateNoTurboPath() string {
 func GetProcSysFilePath(file string) string {
 	return filepath.Join(Conf.ProcRootDir, SysctlSubDir, file)
 }
+
+func GetPCIDeviceDir() string { return filepath.Join(Conf.SysRootDir, SysPCIDeviceDir) }
 
 var _ utilsysctl.Interface = &ProcSysctl{}
 
@@ -144,6 +141,20 @@ func (*ProcSysctl) SetSysctl(sysctl string, newVal int) error {
 	return os.WriteFile(GetProcSysFilePath(sysctl), []byte(strconv.Itoa(newVal)), 0640)
 }
 
+func IsGroupIdentitySysctlSupported() bool {
+	return FileExists(GetProcSysFilePath(KernelSchedGroupIdentityEnable))
+}
+
+func GetSchedGroupIdentity() (bool, error) {
+	s := NewProcSysctl()
+	// 0: disabled; 1: enabled
+	cur, err := s.GetSysctl(KernelSchedGroupIdentityEnable)
+	if err != nil {
+		return false, fmt.Errorf("cannot get sysctl group identity, err: %w", err)
+	}
+	return cur == 1, nil
+}
+
 func SetSchedGroupIdentity(enable bool) error {
 	s := NewProcSysctl()
 	cur, err := s.GetSysctl(KernelSchedGroupIdentityEnable)
@@ -161,8 +172,104 @@ func SetSchedGroupIdentity(enable bool) error {
 
 	err = s.SetSysctl(KernelSchedGroupIdentityEnable, v)
 	if err != nil {
-		return fmt.Errorf("cannot set sysctl group identity, err: %v", err)
+		return fmt.Errorf("cannot set sysctl group identity, err: %w", err)
 	}
 	klog.V(4).Infof("SetSchedGroupIdentity set sysctl config successfully, value %v", v)
 	return nil
+}
+
+func GetSchedCore() (bool, error) {
+	s := NewProcSysctl()
+	// 0: disabled; 1: enabled
+	cur, err := s.GetSysctl(KernelSchedCore)
+	if err != nil {
+		return false, fmt.Errorf("cannot get sysctl sched core, err: %w", err)
+	}
+	return cur == 1, nil
+}
+
+func SetSchedCore(enable bool) error {
+	s := NewProcSysctl()
+	cur, err := s.GetSysctl(KernelSchedCore)
+	if err != nil {
+		return fmt.Errorf("cannot get sysctl sched core, err: %w", err)
+	}
+	v := 0 // 0: disabled; 1: enabled
+	if enable {
+		v = 1
+	}
+	if cur == v {
+		klog.V(6).Infof("SetSchedCore skips since current sysctl config is already %v", enable)
+		return nil
+	}
+
+	err = s.SetSysctl(KernelSchedCore, v)
+	if err != nil {
+		return fmt.Errorf("cannot set sysctl sched core, err: %w", err)
+	}
+	klog.V(4).Infof("SetSchedCore set sysctl config successfully, value %v", v)
+	return nil
+}
+
+func GetSchedFeatures() (map[string]bool, error) {
+	featurePath := SchedFeatures.Path("")
+	content, err := os.ReadFile(featurePath)
+	if err != nil {
+		klog.V(5).Infof("sched_features is unsupported, path %s, read err: %s", featurePath, err)
+		return nil, fmt.Errorf("failed to read sched_features, err: %w", err)
+	}
+
+	var errs []error
+	schedFeatureMap := map[string]bool{}
+	features := strings.Fields(string(content))
+	for _, feature := range features {
+		if strings.HasPrefix(feature, "NO_") {
+			featureName := strings.TrimPrefix(feature, "NO_")
+			if v, ok := schedFeatureMap[featureName]; ok && v {
+				errs = append(errs, fmt.Errorf("failed to read conflict sched_features, feature %s", featureName))
+				continue
+			}
+			schedFeatureMap[featureName] = false
+		} else {
+			if v, ok := schedFeatureMap[feature]; ok && !v {
+				errs = append(errs, fmt.Errorf("failed to read conflict sched_features, feature %s", feature))
+				continue
+			}
+			schedFeatureMap[feature] = true
+		}
+	}
+
+	return schedFeatureMap, errors.NewAggregate(errs)
+}
+
+func SetSchedFeatures(featureMap map[string]bool, valueMap map[string]bool) error {
+	if featureMap == nil && valueMap == nil {
+		return nil
+	}
+	if featureMap == nil {
+		return fmt.Errorf("cannot set to nil featureMap")
+	}
+
+	var errs []error
+	featurePath := SchedFeatures.Path("")
+	for featureName, value := range valueMap {
+		if _, ok := featureMap[featureName]; ok && value == featureMap[featureName] {
+			klog.V(6).Infof("skip to set unchanged sched_feature, feature %s, value %v", featureName, value)
+			continue
+		}
+		if value { // write XXX to sched_features
+			err := os.WriteFile(featurePath, []byte(fmt.Sprintf("%s\n", featureName)), 0666)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("failed to write sched_features, feature %s, value %v, err: %w", featureName, value, err))
+				continue
+			}
+		} else { // write NO_XXX to sched_features
+			err := os.WriteFile(featurePath, []byte(fmt.Sprintf("NO_%s\n", featureName)), 0666)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("failed to write sched_features, feature %s, value %v, err: %w", featureName, value, err))
+				continue
+			}
+		}
+	}
+	return errors.NewAggregate(errs)
 }

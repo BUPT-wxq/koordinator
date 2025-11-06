@@ -24,17 +24,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	testing2 "k8s.io/kubernetes/pkg/scheduler/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
+
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
-	//"github.com/koordinator-sh/koordinator/pkg/features"
+	koordfeatures "github.com/koordinator-sh/koordinator/pkg/features"
 	utilclient "github.com/koordinator-sh/koordinator/pkg/util/client"
-	//utilfeature "github.com/koordinator-sh/koordinator/pkg/util/feature"
+	utilfeature "github.com/koordinator-sh/koordinator/pkg/util/feature"
 )
 
 func newFakeQuotaTopology() *quotaTopology {
@@ -66,12 +65,12 @@ func TestQuotaTopology_basicItemCheck(t *testing.T) {
 			err:   nil,
 		},
 		{
-			name:  "max <0",
+			name:  "max < 0",
 			quota: MakeQuota("temp").Max(MakeResourceList().CPU(-1).Mem(1048576).Obj()).Obj(),
 			err:   fmt.Errorf("%v quota.Spec.Max's value < 0, in dimensions :%v", "temp", "[cpu]"),
 		},
 		{
-			name: "min <0",
+			name: "min < 0",
 			quota: MakeQuota("temp").Min(MakeResourceList().CPU(-1).Mem(1048576).Obj()).
 				Max(MakeResourceList().CPU(1).Mem(1048576).Obj()).Obj(),
 			err: fmt.Errorf("%v quota.Spec.Min's value < 0, in dimensions :%v", "temp", "[cpu]"),
@@ -80,20 +79,40 @@ func TestQuotaTopology_basicItemCheck(t *testing.T) {
 			name: "min dimension larger than max",
 			quota: MakeQuota("temp").Min(MakeResourceList().CPU(1).Mem(1048576).Obj()).
 				Max(MakeResourceList().CPU(10).Obj()).Obj(),
-			err: fmt.Errorf("%v min :%v > max,%v", "temp",
-				MakeResourceList().CPU(1).Mem(1048576).Obj(), MakeResourceList().CPU(10).Obj()),
+			err: fmt.Errorf("resourceKey %v of quota %v is included in min, which is not included in max", "memory", "temp"),
 		},
 		{
 			name: "min > max",
 			quota: MakeQuota("temp").Min(MakeResourceList().CPU(12).Obj()).
 				Max(MakeResourceList().CPU(10).Obj()).Obj(),
-			err: fmt.Errorf("%v min :%v > max,%v", "temp",
-				MakeResourceList().CPU(12).Obj(), MakeResourceList().CPU(10).Obj()),
+			err: fmt.Errorf("resourceKey %v of quota %v min 12 > max 10", "cpu", "temp"),
 		},
 		{
-			name:  "min dimension larger than max",
-			quota: MakeQuota("temp").sharedWeight(MakeResourceList().CPU(-1).Mem(1048576).Obj()).Obj(),
+			name:  "annotation sharedWeight < 0",
+			quota: MakeQuota("temp").sharedWeight(MakeResourceList().CPU(-1).Mem(1048576).Obj()).Max(MakeResourceList().CPU(0).Mem(1048576).Obj()).Obj(),
 			err:   fmt.Errorf("%v quota.Annotation[%v]'s value < 0, in dimension :%v", "temp", extension.AnnotationSharedWeight, "[cpu]"),
+		},
+		{
+			name: "annotation check max >= used",
+			quota: MakeQuota("temp").Annotations(map[string]string{extension.AnnotationMaxStrictCheckResourceKeys: `["cpu","memory"]`}).
+				Max(MakeResourceList().CPU(0).Mem(1048576).Obj()).Used(MakeResourceList().CPU(0).Mem(10485760).Obj()).Obj(),
+			err: fmt.Errorf("resourceKey memory of quota temp max 1048576 < used 10485760"),
+		},
+		{
+			name: "annotation check max >= used, ignore other resources",
+			quota: MakeQuota("temp").Annotations(map[string]string{extension.AnnotationMaxStrictCheckResourceKeys: `["cpu"]`}).
+				Max(MakeResourceList().CPU(0).Mem(1048576).Obj()).Used(MakeResourceList().CPU(0).Mem(10485760).Obj()).Obj(),
+		},
+		{
+			name: "annotation check max >= used, ignore empty used",
+			quota: MakeQuota("temp").Annotations(map[string]string{extension.AnnotationMaxStrictCheckResourceKeys: `["cpu","memory"]`}).
+				Max(MakeResourceList().CPU(0).Mem(1048576).Obj()).Used(MakeResourceList().CPU(0).Obj()).Obj(),
+		},
+		{
+			name: "annotation check max >= used, check empty max",
+			quota: MakeQuota("temp").Annotations(map[string]string{extension.AnnotationMaxStrictCheckResourceKeys: `["cpu","memory"]`}).
+				Max(MakeResourceList().CPU(0).Obj()).Used(MakeResourceList().CPU(0).Mem(10485760).Obj()).Obj(),
+			err: fmt.Errorf("resourceKey memory of quota temp is included in used, which is not included in max but should check max >= used"),
 		},
 	}
 	for _, tt := range tests {
@@ -101,108 +120,245 @@ func TestQuotaTopology_basicItemCheck(t *testing.T) {
 			qt := newFakeQuotaTopology()
 			qt.fillQuotaDefaultInformation(tt.quota)
 			err := qt.validateQuotaSelfItem(tt.quota)
-			assert.Equal(t, err, tt.err)
+			assert.Equal(t, tt.err, err)
 		})
 	}
 }
 
-func TestQuotaTopology_fillDefaultQuotaInfo(t *testing.T) {
-	qt := newFakeQuotaTopology()
-	quota := MakeQuota("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).Obj()
-	quota.Labels = nil
-	quota.Annotations = nil
-	err := qt.fillQuotaDefaultInformation(quota)
-	assert.Nil(t, err)
-	assert.Equal(t, extension.RootQuotaName, quota.Labels[extension.LabelQuotaParent])
-	maxQuota, _ := json.Marshal(quota.Spec.Max)
-	assert.Equal(t, string(maxQuota), quota.Annotations[extension.AnnotationSharedWeight])
-
-	qt.OnQuotaAdd(quota)
-
-	quota = MakeQuota("temp2-bu1").ParentName("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).Obj()
-	err = qt.fillQuotaDefaultInformation(quota)
-	assert.Nil(t, err)
-	assert.Equal(t, "temp2", quota.Labels[extension.LabelQuotaParent])
-	assert.Equal(t, string(maxQuota), quota.Annotations[extension.AnnotationSharedWeight])
+func TestQuotaTopology_fillQuotaDefaultInformation(t *testing.T) {
+	type quotaInfo struct {
+		initOne                      *v1alpha1.ElasticQuota
+		expectLabelQuotaParent       string
+		expectAnnotationSharedWeight string
+		expectedLabelQuotaTreeID     string
+	}
+	testCase := []struct {
+		name   string
+		quotas []*quotaInfo
+	}{
+		{
+			name: "parent quota without treeID",
+			quotas: []*quotaInfo{
+				{
+					initOne:                      MakeQuota("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).Obj(),
+					expectLabelQuotaParent:       extension.RootQuotaName,
+					expectAnnotationSharedWeight: "{\"cpu\":\"120\",\"memory\":\"1048576\"}",
+					expectedLabelQuotaTreeID:     "",
+				},
+				{
+					initOne:                      MakeQuota("temp2-bu1").ParentName("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).Obj(),
+					expectLabelQuotaParent:       "temp2",
+					expectAnnotationSharedWeight: "{\"cpu\":\"120\",\"memory\":\"1048576\"}",
+					expectedLabelQuotaTreeID:     "",
+				},
+			},
+		},
+		{
+			name: "parent quota with treeID",
+			quotas: []*quotaInfo{
+				{
+					initOne:                      MakeQuota("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).TreeID("tree-1").Obj(),
+					expectLabelQuotaParent:       extension.RootQuotaName,
+					expectAnnotationSharedWeight: "{\"cpu\":\"120\",\"memory\":\"1048576\"}",
+					expectedLabelQuotaTreeID:     "tree-1",
+				},
+				{
+					initOne:                      MakeQuota("temp2-bu1").ParentName("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).Obj(),
+					expectLabelQuotaParent:       "temp2",
+					expectAnnotationSharedWeight: "{\"cpu\":\"120\",\"memory\":\"1048576\"}",
+					expectedLabelQuotaTreeID:     "tree-1",
+				},
+			},
+		},
+		{
+			name: "quota with annotation SharedWeight, SharedWeight.keys == maxQuota.keys",
+			quotas: []*quotaInfo{
+				{
+					initOne:                      MakeQuota("temp2").sharedWeight(MakeResourceList().CPU(0).Mem(0).Obj()).Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).TreeID("tree-1").Obj(),
+					expectLabelQuotaParent:       extension.RootQuotaName,
+					expectAnnotationSharedWeight: "{\"cpu\":\"0\",\"memory\":\"0\"}",
+					expectedLabelQuotaTreeID:     "tree-1",
+				},
+			},
+		},
+		{
+			name: "quota with annotation SharedWeight, SharedWeight.keys > maxQuota.keys",
+			quotas: []*quotaInfo{
+				{
+					initOne:                      MakeQuota("temp2").sharedWeight(MakeResourceList().CPU(0).Mem(0).Obj()).Max(MakeResourceList().Mem(1048576).Obj()).TreeID("tree-1").Obj(),
+					expectLabelQuotaParent:       extension.RootQuotaName,
+					expectAnnotationSharedWeight: "{\"memory\":\"0\"}",
+					expectedLabelQuotaTreeID:     "tree-1",
+				},
+			},
+		},
+		{
+			name: "quota with annotation SharedWeight, SharedWeight.keys < maxQuota.keys",
+			quotas: []*quotaInfo{
+				{
+					initOne:                      MakeQuota("temp2").sharedWeight(MakeResourceList().CPU(0).Obj()).Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).TreeID("tree-1").Obj(),
+					expectLabelQuotaParent:       extension.RootQuotaName,
+					expectAnnotationSharedWeight: "{\"cpu\":\"0\",\"memory\":\"1048576\"}",
+					expectedLabelQuotaTreeID:     "tree-1",
+				},
+			},
+		},
+		{
+			name: "quota with annotation SharedWeight, len(SharedWeight.keys) == len(maxQuota.keys), SharedWeight.keys != maxQuota.keys",
+			quotas: []*quotaInfo{
+				{
+					initOne:                      MakeQuota("temp2").sharedWeight(MakeResourceList().CPU(0).Obj()).Max(MakeResourceList().Mem(1048576).Obj()).TreeID("tree-1").Obj(),
+					expectLabelQuotaParent:       extension.RootQuotaName,
+					expectAnnotationSharedWeight: "{\"memory\":\"1048576\"}",
+					expectedLabelQuotaTreeID:     "tree-1",
+				},
+			},
+		},
+	}
+	for _, tt := range testCase {
+		t.Run(tt.name, func(t *testing.T) {
+			qt := newFakeQuotaTopology()
+			for _, info := range tt.quotas {
+				quota := info.initOne
+				err := qt.fillQuotaDefaultInformation(quota)
+				assert.Nil(t, err)
+				assert.Equal(t, info.expectLabelQuotaParent, quota.Labels[extension.LabelQuotaParent])
+				assert.Equal(t, info.expectAnnotationSharedWeight, quota.Annotations[extension.AnnotationSharedWeight])
+				assert.Equal(t, info.expectedLabelQuotaTreeID, quota.Labels[extension.LabelQuotaTreeID])
+				qt.OnQuotaAdd(quota)
+			}
+		})
+	}
 }
-
-func TestQuotaTopology_fillDefaultQuotaInfoWithTreeID(t *testing.T) {
-	qt := newFakeQuotaTopology()
-	quota := MakeQuota("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).TreeID("tree-1").Obj()
-	err := qt.fillQuotaDefaultInformation(quota)
-	assert.Nil(t, err)
-	assert.Equal(t, extension.RootQuotaName, quota.Labels[extension.LabelQuotaParent])
-	assert.Equal(t, "tree-1", quota.Labels[extension.LabelQuotaTreeID])
-	maxQuota, _ := json.Marshal(quota.Spec.Max)
-	assert.Equal(t, string(maxQuota), quota.Annotations[extension.AnnotationSharedWeight])
-
-	qt.OnQuotaAdd(quota)
-
-	quota = MakeQuota("temp2-bu1").ParentName("temp2").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).Obj()
-	err = qt.fillQuotaDefaultInformation(quota)
-	assert.Nil(t, err)
-	assert.Equal(t, "temp2", quota.Labels[extension.LabelQuotaParent])
-	assert.Equal(t, "tree-1", quota.Labels[extension.LabelQuotaTreeID])
-	assert.Equal(t, string(maxQuota), quota.Annotations[extension.AnnotationSharedWeight])
-}
-
 func TestQuotaTopology_checkSubAndParentGroupMaxQuotaKeySame(t *testing.T) {
 	tests := []struct {
-		name     string
-		parQuota *v1alpha1.ElasticQuota
-		quota    *v1alpha1.ElasticQuota
-		subQuota *v1alpha1.ElasticQuota
-		err      error
-		eraseSub bool
+		name                     string
+		parQuota                 *v1alpha1.ElasticQuota
+		quota                    *v1alpha1.ElasticQuota
+		subQuota                 *v1alpha1.ElasticQuota
+		enableResourceTypeUpdate bool
+		err                      error
+		eraseSub                 bool
 	}{
 		{
 			name:  "no tree",
 			quota: MakeQuota("temp").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).IsParent(true).Obj(),
 			subQuota: MakeQuota("temp-bu1").ParentName("temp").
 				Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).IsParent(false).Obj(),
-			err: nil,
+			enableResourceTypeUpdate: false,
+			err:                      nil,
 		},
 		{
 			name: "parent is root",
 			quota: MakeQuota("temp-bu1").ParentName(extension.RootQuotaName).
 				Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).IsParent(false).Obj(),
-			err: nil,
+			enableResourceTypeUpdate: false,
+			err:                      nil,
 		},
 		{
-			name:  "parent's key size > child's key size",
+			name:  "child's max has different dimension with its,but be included, enableResourceTypeUpdate = false",
 			quota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Mem(120).Obj()).IsParent(true).Obj(),
 			subQuota: MakeQuota("temp-bu1").ParentName("temp").
 				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
-			err: fmt.Errorf("error"),
+			enableResourceTypeUpdate: false,
+			err:                      fmt.Errorf("error"),
 		},
 		{
-			name:  "size same, dimension is different",
+			name:  "child's max has same dimension with its,but be included, enableResourceTypeUpdate = false",
+			quota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Obj()).IsParent(true).Obj(),
+			subQuota: MakeQuota("temp-bu1").ParentName("temp").
+				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: false,
+			err:                      nil,
+		},
+		{
+			name:  "child's max has different dimension with its,but be included, enableResourceTypeUpdate = true",
+			quota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Mem(120).Obj()).IsParent(true).Obj(),
+			subQuota: MakeQuota("temp-bu1").ParentName("temp").
+				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: true,
+			err:                      nil,
+		},
+		{
+			name:  "child's max has different dimension with its,not be included, enableResourceTypeUpdate = true",
 			quota: MakeQuota("temp").Max(MakeResourceList().Mem(120).Obj()).IsParent(true).Obj(),
 			subQuota: MakeQuota("temp-bu1").ParentName("temp").
 				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
-			err: fmt.Errorf("error"),
+			enableResourceTypeUpdate: true,
+			err:                      fmt.Errorf("error"),
 		},
 		{
-			name:  "child's key size > parent's key size",
-			quota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Obj()).IsParent(true).Obj(),
-			subQuota: MakeQuota("temp-bu1").ParentName("temp").
-				Max(MakeResourceList().CPU(120).Mem(120).Obj()).IsParent(false).Obj(),
-			err: fmt.Errorf("error"),
+			name:     "its max has different dimension with parent's,but be included, enableResourceTypeUpdate = false",
+			parQuota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Mem(120).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: false,
+			err:                      fmt.Errorf("error"),
 		},
 		{
-			name:     "quotaInfo not satisfy",
+			name:     "its max has same dimension with parent's,but be included, enableResourceTypeUpdate = false",
 			parQuota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Obj()).IsParent(true).Obj(),
 			quota: MakeQuota("temp-bu1").ParentName("temp").
-				Max(MakeResourceList().CPU(120).Mem(120).Obj()).IsParent(false).Obj(),
-			err: fmt.Errorf("error"),
+				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: false,
+			err:                      nil,
+		},
+		{
+			name:     "its max has different dimension with parent's,but be included, enableResourceTypeUpdate = true",
+			parQuota: MakeQuota("temp").Max(MakeResourceList().CPU(10).Mem(120).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: true,
+			err:                      nil,
+		},
+		{
+			name:     "its max has different dimension with parent's,not be included, enableResourceTypeUpdate = true",
+			parQuota: MakeQuota("temp").Max(MakeResourceList().Mem(120).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Max(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: true,
+			err:                      fmt.Errorf("error"),
+		},
+		{
+			name:     "its min has different dimension with parent's,but be included, enableResourceTypeUpdate = false",
+			parQuota: MakeQuota("temp").Min(MakeResourceList().CPU(10).Mem(120).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Min(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: false,
+			err:                      nil,
+		},
+		{
+			name:     "its min has different dimension with parent's,not be all included, enableResourceTypeUpdate = false",
+			parQuota: MakeQuota("temp").Min(MakeResourceList().CPU(10).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Min(MakeResourceList().CPU(120).Mem(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: false,
+			err:                      fmt.Errorf("error"),
+		},
+		{
+			name:     "its min has different dimension with parent's,but be all included, enableResourceTypeUpdate = true",
+			parQuota: MakeQuota("temp").Min(MakeResourceList().CPU(10).Mem(120).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Min(MakeResourceList().CPU(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: true,
+			err:                      nil,
+		},
+		{
+			name:     "its min has different dimension with parent's,not be included, enableResourceTypeUpdate = true",
+			parQuota: MakeQuota("temp").Min(MakeResourceList().CPU(10).Obj()).IsParent(true).Obj(),
+			quota: MakeQuota("temp-bu1").ParentName("temp").
+				Min(MakeResourceList().CPU(120).Mem(120).Obj()).IsParent(false).Obj(),
+			enableResourceTypeUpdate: true,
+			err:                      fmt.Errorf("error"),
 		},
 		{
 			name:  "bug",
 			quota: MakeQuota("temp").Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).IsParent(true).Obj(),
 			subQuota: MakeQuota("temp-bu1").ParentName("temp").
 				Max(MakeResourceList().CPU(120).Mem(1048576).Obj()).IsParent(false).Obj(),
-			err:      fmt.Errorf("error"),
-			eraseSub: true,
+			enableResourceTypeUpdate: false,
+			err:                      fmt.Errorf("error"),
+			eraseSub:                 true,
 		},
 	}
 	for _, tt := range tests {
@@ -215,7 +371,7 @@ func TestQuotaTopology_checkSubAndParentGroupMaxQuotaKeySame(t *testing.T) {
 			if tt.eraseSub {
 				delete(qt.quotaInfoMap, tt.subQuota.Name)
 			}
-			err := qt.checkSubAndParentGroupMaxQuotaKeySame(quotaInfo)
+			err := qt.checkSubAndParentGroupQuotaKey(quotaInfo, tt.enableResourceTypeUpdate)
 			if (tt.err != nil && err == nil) || (tt.err == nil && err != nil) {
 				t.Errorf("error")
 			}
@@ -505,7 +661,9 @@ func TestQuotaTopology_ValidUpdateQuota(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("quota has children, isParent is forbidden to modify as false, quotaName:%v", quota1.Name), err.Error())
 
 	pod1 := MakePod("", "pod1").Label(extension.LabelQuotaName, "sub-1").Obj()
-	client := fake.NewClientBuilder().Build()
+	client := fake.NewClientBuilder().WithIndex(&v1.Pod{}, "label.quotaName", func(object client.Object) []string {
+		return []string{object.(*v1.Pod).Labels[extension.LabelQuotaName]}
+	}).Build()
 	v1alpha1.AddToScheme(client.Scheme())
 	qt.client = client
 	qt.client.Create(context.TODO(), pod1)
@@ -525,7 +683,7 @@ func TestQuotaTopology_ValidUpdateQuota(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("quota has bound pods, isParent is forbidden to modify as true, quotaName: sub-1"), err.Error())
 
 	qt.client.Delete(context.TODO(), pod2)
-	pod3 := MakePod("sub-2", "pod3").Obj()
+	pod3 := MakePod("sub-2", "pod3").Label(extension.LabelQuotaName, "sub-1").Obj()
 	qt.client.Create(context.TODO(), pod3)
 
 	sub1.Annotations[extension.AnnotationQuotaNamespaces] = "[\"namespace1\",\"namespace2\"]"
@@ -575,7 +733,9 @@ func TestQuotaTopology_ListQuotaPods(t *testing.T) {
 func TestQuotaTopology_AnnotationNamespaces(t *testing.T) {
 	quota := MakeQuota("temp").Annotations(map[string]string{extension.AnnotationQuotaNamespaces: "[\"test1\",\"test2\"]"}).Obj()
 	qt := newFakeQuotaTopology()
-	client := fake.NewClientBuilder().Build()
+	client := fake.NewClientBuilder().WithIndex(&v1.Pod{}, "label.quotaName", func(object client.Object) []string {
+		return []string{object.(*v1.Pod).Labels["label.quotaName"]}
+	}).Build()
 	v1alpha1.AddToScheme(client.Scheme())
 	qt.client = client
 
@@ -619,7 +779,9 @@ func TestQuotaTopology_AnnotationNamespaces(t *testing.T) {
 func TestQuotaTopology_ValidDeleteQuota(t *testing.T) {
 	qt := newFakeQuotaTopology()
 
-	client := fake.NewClientBuilder().Build()
+	client := fake.NewClientBuilder().WithIndex(&v1.Pod{}, "label.quotaName", func(object client.Object) []string {
+		return []string{object.(*v1.Pod).Labels[extension.LabelQuotaName]}
+	}).Build()
 	v1alpha1.AddToScheme(client.Scheme())
 	qt.client = client
 
@@ -649,26 +811,26 @@ func TestQuotaTopology_ValidDeleteQuota(t *testing.T) {
 	assert.Equal(t, 0, len(qt.quotaHierarchyInfo["temp2"]))
 
 	err = qt.ValidDeleteQuota(quota1)
-	assert.True(t, err == nil)
+	assert.NoError(t, err)
 	assert.Equal(t, 2, len(qt.quotaInfoMap))
 	assert.Equal(t, 3, len(qt.quotaHierarchyInfo))
 	assert.Equal(t, 1, len(qt.quotaHierarchyInfo["temp"]))
 
 	// add pod to quota sub-1
-	pod := MakePod("sub-1", "pod1").Obj()
+	pod := MakePod("sub-1", "pod1").Label(extension.LabelQuotaName, "sub-1").Obj()
 	err = qt.client.Create(context.TODO(), pod)
 	assert.Nil(t, err)
 
 	// forbidden delete quota with pods
 	err = qt.ValidDeleteQuota(sub1)
-	assert.True(t, err != nil)
+	assert.Error(t, err)
 
 	// delete pod
 	err = qt.client.Delete(context.TODO(), pod)
 	assert.Nil(t, err)
 
 	err = qt.ValidDeleteQuota(sub1)
-	assert.True(t, err == nil)
+	assert.NoError(t, err)
 	assert.Equal(t, 1, len(qt.quotaInfoMap))
 	assert.Equal(t, 2, len(qt.quotaHierarchyInfo))
 	assert.Equal(t, 0, len(qt.quotaHierarchyInfo["temp"]))
@@ -767,6 +929,11 @@ func TestQuotaTopology_AddPod_UpdatePod(t *testing.T) {
 
 	err = qt.ValidateUpdatePod(pod2, oldPod2)
 	assert.NotNil(t, err)
+
+	defer utilfeature.SetFeatureGateDuringTest(t, utilfeature.DefaultMutableFeatureGate, koordfeatures.SupportParentQuotaSubmitPod, true)()
+
+	err = qt.ValidateUpdatePod(pod2, oldPod2)
+	assert.Nil(t, err)
 
 	pod2.Labels[extension.LabelQuotaName] = "default"
 	err = qt.ValidateUpdatePod(oldPod2, pod2)
@@ -912,131 +1079,4 @@ func TestQuotaTopology_checkGuaranteeForMin(t *testing.T) {
 			}
 		})
 	}
-}
-
-type podWrapper struct{ *v1.Pod }
-
-func MakePod(namespace, name string) *podWrapper {
-	pod := testing2.MakePod().Namespace(namespace).Name(name).Obj()
-
-	return &podWrapper{pod}
-}
-
-func (p *podWrapper) Label(string1, string2 string) *podWrapper {
-	if p.Labels == nil {
-		p.Labels = make(map[string]string)
-	}
-	p.Labels[string1] = string2
-	return p
-}
-
-func (p *podWrapper) Obj() *v1.Pod {
-	return p.Pod
-}
-
-type quotaWrapper struct {
-	*v1alpha1.ElasticQuota
-}
-
-func MakeQuota(name string) *quotaWrapper {
-	eq := &v1alpha1.ElasticQuota{
-		TypeMeta: metav1.TypeMeta{Kind: "ElasticQuota", APIVersion: "scheduling.sigs.k8s.io/v1alpha1"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Labels:      make(map[string]string),
-			Annotations: make(map[string]string),
-		},
-	}
-	return &quotaWrapper{eq}
-}
-
-func (q *quotaWrapper) Namespace(ns string) *quotaWrapper {
-	q.ElasticQuota.Namespace = ns
-	return q
-}
-
-func (q *quotaWrapper) Min(min v1.ResourceList) *quotaWrapper {
-	q.ElasticQuota.Spec.Min = min
-	return q
-}
-
-func (q *quotaWrapper) Max(max v1.ResourceList) *quotaWrapper {
-	q.ElasticQuota.Spec.Max = max
-	return q
-}
-
-func (q *quotaWrapper) TreeID(tree string) *quotaWrapper {
-	q.ElasticQuota.Labels[extension.LabelQuotaTreeID] = tree
-	return q
-}
-
-func (q *quotaWrapper) Guaranteed(guaranteed v1.ResourceList) *quotaWrapper {
-	raw, err := json.Marshal(guaranteed)
-	if err == nil {
-		q.ElasticQuota.Annotations[extension.AnnotationGuaranteed] = string(raw)
-	}
-	return q
-}
-
-func (q *quotaWrapper) IsRoot(isRoot bool) *quotaWrapper {
-	if isRoot {
-		q.Labels[extension.LabelQuotaIsRoot] = "true"
-	}
-	return q
-}
-
-func (q *quotaWrapper) sharedWeight(sharedWeight v1.ResourceList) *quotaWrapper {
-	sharedWeightBytes, _ := json.Marshal(sharedWeight)
-	q.ElasticQuota.Annotations[extension.AnnotationSharedWeight] = string(sharedWeightBytes)
-	return q
-}
-
-func (q *quotaWrapper) IsParent(isParent bool) *quotaWrapper {
-	if isParent {
-		q.Labels[extension.LabelQuotaIsParent] = "true"
-	} else {
-		q.Labels[extension.LabelQuotaIsParent] = "false"
-	}
-	return q
-}
-
-func (q *quotaWrapper) ParentName(parentName string) *quotaWrapper {
-	q.Labels[extension.LabelQuotaParent] = parentName
-	return q
-}
-
-func (q *quotaWrapper) Annotations(annotations map[string]string) *quotaWrapper {
-	for k, v := range annotations {
-		q.ElasticQuota.Annotations[k] = v
-	}
-	return q
-}
-
-func (q *quotaWrapper) Obj() *v1alpha1.ElasticQuota {
-	return q.ElasticQuota
-}
-
-type resourceWrapper struct{ v1.ResourceList }
-
-func MakeResourceList() *resourceWrapper {
-	return &resourceWrapper{v1.ResourceList{}}
-}
-
-func (r *resourceWrapper) CPU(val int64) *resourceWrapper {
-	r.ResourceList[v1.ResourceCPU] = *resource.NewQuantity(val, resource.DecimalSI)
-	return r
-}
-
-func (r *resourceWrapper) Mem(val int64) *resourceWrapper {
-	r.ResourceList[v1.ResourceMemory] = *resource.NewQuantity(val, resource.DecimalSI)
-	return r
-}
-
-func (r *resourceWrapper) GPU(val int64) *resourceWrapper {
-	r.ResourceList["nvidia.com/gpu"] = *resource.NewQuantity(val, resource.DecimalSI)
-	return r
-}
-
-func (r *resourceWrapper) Obj() v1.ResourceList {
-	return r.ResourceList
 }

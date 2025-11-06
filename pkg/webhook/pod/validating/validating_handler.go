@@ -19,14 +19,25 @@ package validating
 import (
 	"context"
 	"net/http"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/koordinator-sh/koordinator/pkg/webhook/elasticquota"
+	"github.com/koordinator-sh/koordinator/pkg/webhook/metrics"
+	"github.com/koordinator-sh/koordinator/pkg/webhook/quotaevaluate"
+)
+
+const (
+	ClusterReservation       = "ClusterReservation"
+	ClusterColocationProfile = "ClusterColocationProfile"
+	EvaluateQuota            = "EvaluateQuota"
+	DeviceResource           = "DeviceResource"
+	EnhancedValidation       = "EnhancedValidation"
 )
 
 // PodValidatingHandler handles Pod
@@ -35,6 +46,12 @@ type PodValidatingHandler struct {
 
 	// Decoder decodes objects
 	Decoder *admission.Decoder
+
+	// QuotaEvaluator evaluate pod quota usage
+	QuotaEvaluator quotaevaluate.Evaluator
+
+	// PodEnhancedValidator manages pod enhanced validation configuration
+	PodEnhancedValidator *PodEnhancedValidator
 }
 
 var _ admission.Handler = &PodValidatingHandler{}
@@ -57,14 +74,62 @@ func (h *PodValidatingHandler) validatingPodFn(ctx context.Context, req admissio
 		klog.Warningf("Skip to validate pod %s/%s deletion for no old object, maybe because of Kubernetes version < 1.16", req.Namespace, req.Name)
 		return
 	}
-
-	allowed, reason, err = h.clusterColocationProfileValidatingPod(ctx, req)
-	if err == nil {
-		plugin := elasticquota.NewPlugin(h.Decoder, h.Client)
-		if err = plugin.ValidatePod(ctx, req); err != nil {
-			return false, "", err
-		}
+	pod := &corev1.Pod{}
+	if err = h.Decoder.DecodeRaw(req.Object, pod); err != nil {
+		return false, "", err
 	}
+
+	start := time.Now()
+	_, reason, err = h.clusterReservationValidatingPod(ctx, req)
+	metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+		metrics.Pod, string(req.Operation), err, ClusterReservation, time.Since(start).Seconds())
+	if err != nil {
+		return false, reason, err
+	}
+
+	start = time.Now()
+	_, reason, err = h.clusterColocationProfileValidatingPod(ctx, req)
+	metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+		metrics.Pod, string(req.Operation), err, ClusterColocationProfile, time.Since(start).Seconds())
+	if err != nil {
+		return false, reason, err
+	}
+
+	start = time.Now()
+	plugin := elasticquota.NewPlugin(h.Decoder, h.Client)
+	if err = plugin.ValidatePod(ctx, req); err != nil {
+		metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+			metrics.Pod, string(req.Operation), err, plugin.Name(), time.Since(start).Seconds())
+		return false, "", err
+	}
+	metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+		metrics.Pod, string(req.Operation), nil, plugin.Name(), time.Since(start).Seconds())
+
+	start = time.Now()
+	_, reason, err = h.evaluateQuota(ctx, req)
+	metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+		metrics.Pod, string(req.Operation), err, EvaluateQuota, time.Since(start).Seconds())
+
+	if err != nil {
+		return false, reason, err
+	}
+
+	start = time.Now()
+	allowed, reason, err = h.deviceResourceValidatingPod(ctx, req)
+	metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+		metrics.Pod, string(req.Operation), err, DeviceResource, time.Since(start).Seconds())
+	if err != nil {
+		return false, reason, err
+	}
+
+	start = time.Now()
+	reason, err = h.podEnhancedValidate(ctx, req)
+	metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+		metrics.Pod, string(req.Operation), err, EnhancedValidation, time.Since(start).Seconds())
+	if err != nil {
+		return false, reason, err
+	}
+
 	return
 }
 
@@ -79,7 +144,7 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 	return admission.ValidationResponse(allowed, reason)
 }
 
-var _ inject.Client = &PodValidatingHandler{}
+// var _ inject.Client = &PodValidatingHandler{}
 
 // InjectClient injects the client into the PodValidatingHandler
 func (h *PodValidatingHandler) InjectClient(c client.Client) error {
@@ -87,7 +152,7 @@ func (h *PodValidatingHandler) InjectClient(c client.Client) error {
 	return nil
 }
 
-var _ admission.DecoderInjector = &PodValidatingHandler{}
+// var _ admission.DecoderInjector = &PodValidatingHandler{}
 
 // InjectDecoder injects the decoder into the PodValidatingHandler
 func (h *PodValidatingHandler) InjectDecoder(d *admission.Decoder) error {

@@ -33,19 +33,18 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
-	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling"
-	apiv1alpha1 "sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
-	"sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned"
-	"sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions"
-	"sigs.k8s.io/scheduler-plugins/pkg/generated/listers/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling"
+	apiv1alpha1 "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/clientset/versioned"
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions"
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/listers/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config/validation"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 	frameworkexthelper "github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/helper"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/elasticquota/core"
-	reservationutil "github.com/koordinator-sh/koordinator/pkg/util/reservation"
 	"github.com/koordinator-sh/koordinator/pkg/util/transformer"
 )
 
@@ -60,15 +59,16 @@ type PostFilterState struct {
 	quotaInfo          *core.QuotaInfo
 	used               corev1.ResourceList
 	nonPreemptibleUsed corev1.ResourceList
-	runtime            corev1.ResourceList
+	usedLimit          corev1.ResourceList
 }
 
 func (p *PostFilterState) Clone() framework.StateData {
 	return &PostFilterState{
+		skip:               p.skip,
 		quotaInfo:          p.quotaInfo,
 		used:               p.used.DeepCopy(),
 		nonPreemptibleUsed: p.nonPreemptibleUsed.DeepCopy(),
-		runtime:            p.runtime.DeepCopy(),
+		usedLimit:          p.usedLimit.DeepCopy(),
 	}
 }
 
@@ -103,7 +103,7 @@ var (
 func New(args runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	pluginArgs, ok := args.(*config.ElasticQuotaArgs)
 	if !ok {
-		return nil, fmt.Errorf("want args to be of type GangSchedulingArgs, got %T", args)
+		return nil, fmt.Errorf("want args to be of type ElasticQuotaArgs, got %T", args)
 	}
 	if err := validation.ValidateElasticQuotaArgs(pluginArgs); err != nil {
 		return nil, err
@@ -148,7 +148,12 @@ func New(args runtime.Object, handle framework.Handle) (framework.Plugin, error)
 		groupQuotaManagersForQuotaTree: make(map[string]*core.GroupQuotaManager),
 		quotaToTreeMap:                 make(map[string]string),
 	}
-	elasticQuota.groupQuotaManager = core.NewGroupQuotaManager("", pluginArgs.SystemQuotaGroupMax, pluginArgs.DefaultQuotaGroupMax)
+	elasticQuota.groupQuotaManager = core.NewGroupQuotaManager("", pluginArgs.EnableMinQuotaScale, pluginArgs.SystemQuotaGroupMax,
+		pluginArgs.DefaultQuotaGroupMax)
+	err := elasticQuota.groupQuotaManager.InitHookPlugins(pluginArgs)
+	if err != nil {
+		return nil, err
+	}
 
 	elasticQuota.quotaToTreeMap[extension.DefaultQuotaName] = ""
 	elasticQuota.quotaToTreeMap[extension.SystemQuotaName] = ""
@@ -158,11 +163,14 @@ func New(args runtime.Object, handle framework.Handle) (framework.Plugin, error)
 	elasticQuota.createRootQuotaIfNotPresent()
 	elasticQuota.createSystemQuotaIfNotPresent()
 	elasticQuota.createDefaultQuotaIfNotPresent()
-	frameworkexthelper.ForceSyncFromInformer(ctx.Done(), scheSharedInformerFactory, informer, cache.ResourceEventHandlerFuncs{
+	_, err = frameworkexthelper.ForceSyncFromInformerWithReplace(ctx.Done(), scheSharedInformerFactory, informer, cache.ResourceEventHandlerFuncs{
 		AddFunc:    elasticQuota.OnQuotaAdd,
 		UpdateFunc: elasticQuota.OnQuotaUpdate,
 		DeleteFunc: elasticQuota.OnQuotaDelete,
-	})
+	}, elasticQuota.ReplaceQuotas)
+	if err != nil {
+		return nil, err
+	}
 
 	nodeInformer := handle.SharedInformerFactory().Core().V1().Nodes().Informer()
 	frameworkexthelper.ForceSyncFromInformer(ctx.Done(), handle.SharedInformerFactory(), nodeInformer, cache.ResourceEventHandlerFuncs{
@@ -177,6 +185,10 @@ func New(args runtime.Object, handle framework.Handle) (framework.Plugin, error)
 		UpdateFunc: elasticQuota.OnPodUpdate,
 		DeleteFunc: elasticQuota.OnPodDelete,
 	})
+
+	if extendedHandle, ok := handle.(frameworkext.ExtendedHandle); ok {
+		extendedHandle.RegisterForgetPodHandler(elasticQuota.handlePodDelete)
+	}
 
 	elasticQuota.migrateDefaultQuotaGroupsPod()
 
@@ -198,13 +210,13 @@ func (g *Plugin) Name() string {
 	return Name
 }
 
-func (g *Plugin) EventsToRegister() []framework.ClusterEvent {
+func (g *Plugin) EventsToRegister() []framework.ClusterEventWithHint {
 	// To register a custom event, follow the naming convention at:
 	// https://git.k8s.io/kubernetes/pkg/scheduler/eventhandlers.go#L403-L410
 	eqGVK := fmt.Sprintf("elasticquotas.v1alpha1.%v", scheduling.GroupName)
-	return []framework.ClusterEvent{
-		{Resource: framework.Pod, ActionType: framework.Delete},
-		{Resource: framework.GVK(eqGVK), ActionType: framework.All},
+	return []framework.ClusterEventWithHint{
+		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.Delete}},
+		{Event: framework.ClusterEvent{Resource: framework.GVK(eqGVK), ActionType: framework.All}},
 	}
 }
 
@@ -212,33 +224,35 @@ func (g *Plugin) PreFilter(ctx context.Context, cycleState *framework.CycleState
 	quotaName, treeID := g.getPodAssociateQuotaNameAndTreeID(pod)
 	if quotaName == "" {
 		g.skipPostFilterState(cycleState)
-		return nil, framework.NewStatus(framework.Success, "")
+		return nil, framework.NewStatus(framework.Skip)
 	}
 
 	mgr := g.GetGroupQuotaManagerForTree(treeID)
 	if mgr == nil {
 		return nil, framework.NewStatus(framework.Error, fmt.Sprintf("Could not find the specified ElasticQuotaManager for quota: %v, tree: %v", quotaName, treeID))
 	}
-	mgr.RefreshRuntime(quotaName)
+	if g.pluginArgs.EnableRuntimeQuota {
+		mgr.RefreshRuntime(quotaName)
+	}
 	quotaInfo := mgr.GetQuotaInfoByName(quotaName)
 	if quotaInfo == nil {
 		return nil, framework.NewStatus(framework.Error, fmt.Sprintf("Could not find the specified ElasticQuota"))
 	}
 	state := g.snapshotPostFilterState(quotaInfo, cycleState)
 
-	podRequest, _ := core.PodRequestsAndLimits(pod)
-
-	used := quotav1.Mask(quotav1.Add(podRequest, state.used), quotav1.ResourceNames(podRequest))
-	if isLessEqual, exceedDimensions := quotav1.LessThanOrEqual(used, state.runtime); !isLessEqual {
+	podRequest := core.PodRequests(pod)
+	podRequest = quotav1.Mask(podRequest, quotav1.ResourceNames(quotaInfo.CalculateInfo.Max))
+	used := quotav1.Add(podRequest, state.used)
+	if isLessEqual, exceedDimensions := quotav1.LessThanOrEqual(used, state.usedLimit); !isLessEqual {
 		return nil, framework.NewStatus(framework.Unschedulable, fmt.Sprintf("Insufficient quotas, "+
 			"quotaName: %v, runtime: %v, used: %v, pod's request: %v, exceedDimensions: %v",
-			quotaName, printResourceList(state.runtime), printResourceList(state.used), printResourceList(podRequest), exceedDimensions))
+			quotaName, printResourceList(state.usedLimit), printResourceList(state.used), printResourceList(podRequest), exceedDimensions))
 	}
 
 	if extension.IsPodNonPreemptible(pod) {
 		quotaMin := state.quotaInfo.CalculateInfo.Min
 		nonPreemptibleUsed := state.nonPreemptibleUsed
-		addNonPreemptibleUsed := quotav1.Mask(quotav1.Add(podRequest, nonPreemptibleUsed), quotav1.ResourceNames(podRequest))
+		addNonPreemptibleUsed := quotav1.Add(podRequest, nonPreemptibleUsed)
 		if isLessEqual, exceedDimensions := quotav1.LessThanOrEqual(addNonPreemptibleUsed, quotaMin); !isLessEqual {
 			return nil, framework.NewStatus(framework.Unschedulable, fmt.Sprintf("Insufficient non-preemptible quotas, "+
 				"quotaName: %v, min: %v, nonPreemptibleUsed: %v, pod's request: %v, exceedDimensions: %v",
@@ -246,8 +260,15 @@ func (g *Plugin) PreFilter(ctx context.Context, cycleState *framework.CycleState
 		}
 	}
 
-	if *g.pluginArgs.EnableCheckParentQuota {
-		return nil, g.checkQuotaRecursive(quotaName, []string{quotaName}, podRequest)
+	for _, hookPlugin := range mgr.GetHookPlugins() {
+		if err := hookPlugin.CheckPod(quotaName, pod); err != nil {
+			return nil, framework.NewStatus(framework.Unschedulable,
+				fmt.Sprintf("CheckPod failed for hook plugin %v, err: %v", hookPlugin.GetKey(), err))
+		}
+	}
+
+	if g.pluginArgs.EnableCheckParentQuota {
+		return nil, g.checkQuotaRecursive(mgr, quotaInfo.ParentName, []string{quotaInfo.ParentName, quotaName}, podRequest)
 	}
 
 	return nil, framework.NewStatus(framework.Success, "")
@@ -260,10 +281,6 @@ func (g *Plugin) PreFilterExtensions() framework.PreFilterExtensions {
 // AddPod is called by the framework while trying to evaluate the impact
 // of adding podToAdd to the node while scheduling podToSchedule.
 func (g *Plugin) AddPod(ctx context.Context, state *framework.CycleState, podToSchedule *corev1.Pod, podInfoToAdd *framework.PodInfo, nodeInfo *framework.NodeInfo) *framework.Status {
-	if reservationutil.IsReservePod(podInfoToAdd.Pod) {
-		return nil
-	}
-
 	postFilterState, err := getPostFilterState(state)
 	if err != nil {
 		klog.ErrorS(err, "Failed to read postFilterState from cycleState", "elasticQuotaSnapshotKey", postFilterState)
@@ -275,7 +292,8 @@ func (g *Plugin) AddPod(ctx context.Context, state *framework.CycleState, podToS
 	}
 
 	if postFilterState.quotaInfo.IsPodExist(podInfoToAdd.Pod) {
-		podReq, _ := core.PodRequestsAndLimits(podInfoToAdd.Pod)
+		podReq := core.PodRequests(podInfoToAdd.Pod)
+		podReq = quotav1.Mask(podReq, quotav1.ResourceNames(postFilterState.quotaInfo.CalculateInfo.Max))
 		postFilterState.used = quotav1.Add(postFilterState.used, podReq)
 	}
 	return framework.NewStatus(framework.Success, "")
@@ -284,10 +302,6 @@ func (g *Plugin) AddPod(ctx context.Context, state *framework.CycleState, podToS
 // RemovePod is called by the framework while trying to evaluate the impact
 // of removing podToRemove from the node while scheduling podToSchedule.
 func (g *Plugin) RemovePod(ctx context.Context, state *framework.CycleState, podToSchedule *corev1.Pod, podInfoToRemove *framework.PodInfo, nodeInfo *framework.NodeInfo) *framework.Status {
-	if reservationutil.IsReservePod(podInfoToRemove.Pod) {
-		return nil
-	}
-
 	postFilterState, err := getPostFilterState(state)
 	if err != nil {
 		klog.ErrorS(err, "Failed to read postFilterState from cycleState", "elasticQuotaSnapshotKey", postFilterState)
@@ -299,7 +313,8 @@ func (g *Plugin) RemovePod(ctx context.Context, state *framework.CycleState, pod
 	}
 
 	if postFilterState.quotaInfo.IsPodExist(podInfoToRemove.Pod) {
-		podReq, _ := core.PodRequestsAndLimits(podInfoToRemove.Pod)
+		podReq := core.PodRequests(podInfoToRemove.Pod)
+		podReq = quotav1.Mask(podReq, quotav1.ResourceNames(postFilterState.quotaInfo.CalculateInfo.Max))
 		postFilterState.used = quotav1.SubtractWithNonNegativeResult(postFilterState.used, podReq)
 	}
 	return framework.NewStatus(framework.Success, "")
@@ -355,4 +370,8 @@ func (g *Plugin) Unreserve(ctx context.Context, state *framework.CycleState, p *
 		return
 	}
 	mgr.UnreservePod(quotaName, p)
+}
+
+func (g *Plugin) GetQuotaInformer() cache.SharedIndexInformer { // expose for extensions
+	return g.quotaInformer
 }

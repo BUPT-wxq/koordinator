@@ -24,6 +24,7 @@ import (
 	topov1alpha1 "github.com/k8stopologyawareschedwg/noderesourcetopology-api/pkg/apis/topology/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 
@@ -40,9 +41,10 @@ import (
 
 func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 	type fields struct {
-		kubeletPoicy string
-		sharePools   []ext.CPUSharedPool
-		beSharePools []ext.CPUSharedPool
+		kubeletPolicy   string
+		sharePools      []ext.CPUSharedPool
+		beSharePools    []ext.CPUSharedPool
+		systemQOSCPUSet string
 	}
 	type args struct {
 		podAlloc            *ext.ResourceStatus
@@ -57,7 +59,7 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "get cpuset fqrom bad annotation",
+			name: "get cpuset from bad annotation",
 			fields: fields{
 				sharePools: []ext.CPUSharedPool{
 					{
@@ -123,6 +125,9 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 					NUMANodeResources: []ext.NUMANodeResource{
 						{
 							Node: 0,
+							Resources: map[corev1.ResourceName]resource.Quantity{
+								corev1.ResourceCPU: *resource.NewQuantity(2, resource.DecimalSI),
+							},
 						},
 					},
 				},
@@ -159,6 +164,9 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 					NUMANodeResources: []ext.NUMANodeResource{
 						{
 							Node: 0,
+							Resources: map[corev1.ResourceName]resource.Quantity{
+								corev1.ResourceCPU: *resource.NewQuantity(2, resource.DecimalSI),
+							},
 						},
 					},
 				},
@@ -197,9 +205,49 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "get all share pools for ls pod with no cpu numa allocation",
+			fields: fields{
+				sharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "0-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "8-15",
+					},
+				},
+			},
+			args: args{
+				containerReq: &protocol.ContainerRequest{
+					PodMeta:       protocol.PodMeta{},
+					ContainerMeta: protocol.ContainerMeta{},
+					PodLabels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSLS),
+					},
+					PodAnnotations: map[string]string{},
+					CgroupParent:   "burstable/test-pod/test-container",
+				},
+				podAlloc: &ext.ResourceStatus{
+					NUMANodeResources: []ext.NUMANodeResource{
+						{
+							Node: 0,
+							Resources: map[corev1.ResourceName]resource.Quantity{
+								corev1.ResourceHugePagesPrefix + "1Gi": resource.MustParse("2Gi"),
+							},
+						},
+					},
+				},
+			},
+			want:    pointer.String("0-7,8-15"),
+			wantErr: false,
+		},
+		{
 			name: "get all share pools for origin burstable pod under none policy",
 			fields: fields{
-				kubeletPoicy: ext.KubeletCPUManagerPolicyNone,
+				kubeletPolicy: ext.KubeletCPUManagerPolicyNone,
 				sharePools: []ext.CPUSharedPool{
 					{
 						Socket: 0,
@@ -228,7 +276,7 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 		{
 			name: "do nothing for origin burstable pod under static policy",
 			fields: fields{
-				kubeletPoicy: ext.KubeletCPUManagerPolicyStatic,
+				kubeletPolicy: ext.KubeletCPUManagerPolicyStatic,
 				sharePools: []ext.CPUSharedPool{
 					{
 						Socket: 0,
@@ -282,15 +330,174 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 			want:    pointer.String(""),
 			wantErr: false,
 		},
+		{
+			name: "get cpuset from annotation ls share pool",
+			fields: fields{
+				sharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "1-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "9-15",
+					},
+				},
+				beSharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "0-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "8-15",
+					},
+				},
+			},
+			args: args{
+				containerReq: &protocol.ContainerRequest{
+					PodMeta:       protocol.PodMeta{},
+					ContainerMeta: protocol.ContainerMeta{},
+					PodLabels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSLS),
+					},
+					PodAnnotations: map[string]string{},
+					CgroupParent:   "burstable/test-pod/test-container",
+				},
+				podAlloc: &ext.ResourceStatus{
+					NUMANodeResources: []ext.NUMANodeResource{
+						{
+							Node: 1,
+							Resources: map[corev1.ResourceName]resource.Quantity{
+								corev1.ResourceCPU: *resource.NewQuantity(2, resource.DecimalSI),
+							},
+						},
+					},
+				},
+			},
+			want:    pointer.String("9-15"),
+			wantErr: false,
+		},
+		{
+			name: "get cpuset from annotation be share pool",
+			fields: fields{
+				sharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "1-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "9-15",
+					},
+				},
+				beSharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "0-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "8-15",
+					},
+				},
+			},
+			args: args{
+				beCPUManagerEnabled: true,
+				containerReq: &protocol.ContainerRequest{
+					PodMeta:       protocol.PodMeta{},
+					ContainerMeta: protocol.ContainerMeta{},
+					PodLabels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSBE),
+					},
+					PodAnnotations: map[string]string{},
+					CgroupParent:   "besteffort/test-pod/test-container",
+				},
+				podAlloc: &ext.ResourceStatus{
+					NUMANodeResources: []ext.NUMANodeResource{
+						{
+							Node: 1,
+							Resources: map[corev1.ResourceName]resource.Quantity{
+								ext.BatchCPU: *resource.NewQuantity(2000, resource.DecimalSI),
+							},
+						},
+					},
+				},
+			},
+			want:    pointer.String("8-15"),
+			wantErr: false,
+		},
+		{
+			name: "get cpuset from annotation system qos resource",
+			fields: fields{
+				sharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "4-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "9-15",
+					},
+				},
+				beSharePools: []ext.CPUSharedPool{
+					{
+						Socket: 0,
+						Node:   0,
+						CPUSet: "4-7",
+					},
+					{
+						Socket: 1,
+						Node:   1,
+						CPUSet: "8-15",
+					},
+				},
+				systemQOSCPUSet: "0-3",
+			},
+			args: args{
+				containerReq: &protocol.ContainerRequest{
+					PodMeta:       protocol.PodMeta{},
+					ContainerMeta: protocol.ContainerMeta{},
+					PodLabels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSSystem),
+					},
+					PodAnnotations: map[string]string{},
+					CgroupParent:   "burstable/test-pod/test-container",
+				},
+				podAlloc: &ext.ResourceStatus{
+					NUMANodeResources: []ext.NUMANodeResource{
+						{
+							Node: 1,
+							Resources: map[corev1.ResourceName]resource.Quantity{
+								corev1.ResourceHugePagesPrefix + "1Gi": resource.MustParse("2Gi"),
+							},
+						},
+					},
+				},
+			},
+			want:    pointer.String("0-3"),
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &cpusetRule{
 				kubeletPolicy: ext.KubeletCPUManagerPolicy{
-					Policy: tt.fields.kubeletPoicy,
+					Policy: tt.fields.kubeletPolicy,
 				},
-				sharePools:   tt.fields.sharePools,
-				beSharePools: tt.fields.beSharePools,
+				sharePools:      tt.fields.sharePools,
+				beSharePools:    tt.fields.beSharePools,
+				systemQOSCPUSet: tt.fields.systemQOSCPUSet,
 			}
 			if tt.args.podAlloc != nil {
 				podAllocJson := util.DumpJSON(tt.args.podAlloc)
@@ -299,11 +506,8 @@ func Test_cpusetRule_getContainerCPUSet(t *testing.T) {
 			features.DefaultMutableKoordletFeatureGate.SetFromMap(
 				map[string]bool{string(features.BECPUManager): tt.args.beCPUManagerEnabled})
 			got, err := r.getContainerCPUSet(tt.args.containerReq)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("getCPUSet() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			assert.Equal(t, tt.want, got, "cpuset of container should be equal")
+			assert.Equal(t, tt.wantErr, err != nil, err)
+			assert.Equal(t, tt.want, got, "cpuset of container should be equal, want %+v, got %+v", util.DumpJSON(tt.want), util.DumpJSON(got))
 		})
 	}
 	// node.koordinator.sh/cpu-shared-pools: '[{"cpuset":"2-7"}]'
@@ -590,6 +794,7 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 		sandboxID string
 	}
 	type args struct {
+		rule      *cpusetRule
 		pods      []*testPod
 		podAllocs map[string]ext.ResourceStatus
 	}
@@ -606,6 +811,15 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 		{
 			name: "set container cpuset",
 			args: args{
+				rule: &cpusetRule{
+					sharePools: []ext.CPUSharedPool{
+						{
+							Socket: 0,
+							Node:   0,
+							CPUSet: "0-1,5-7",
+						},
+					},
+				},
 				pods: []*testPod{
 					{
 						pod: &corev1.Pod{
@@ -629,6 +843,43 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 							},
 						},
 						sandboxID: "containerd://pod-with-cpuset-alloc-sandbox-id",
+					},
+					{
+						pod: &corev1.Pod{
+							ObjectMeta: metav1.ObjectMeta{
+								UID: "pod-cpu-share-uid",
+								Labels: map[string]string{
+									ext.LabelPodQoS: string(ext.QoSLS),
+								},
+							},
+							Spec: corev1.PodSpec{
+								InitContainers: []corev1.Container{
+									{
+										Name: "init-container-with-cpu-share-name",
+									},
+								},
+								Containers: []corev1.Container{
+									{
+										Name: "container-with-cpu-share-name",
+									},
+								},
+							},
+							Status: corev1.PodStatus{
+								InitContainerStatuses: []corev1.ContainerStatus{
+									{
+										Name:        "init-container-with-cpu-share-name",
+										ContainerID: "containerd://init-container-with-cpu-share-uid",
+									},
+								},
+								ContainerStatuses: []corev1.ContainerStatus{
+									{
+										Name:        "container-with-cpu-share-name",
+										ContainerID: "containerd://container-with-cpu-share-uid",
+									},
+								},
+							},
+						},
+						sandboxID: "containerd://pod-cpu-share-sandbox-id",
 					},
 					{
 						pod: &corev1.Pod{
@@ -666,10 +917,13 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 			wants: wants{
 				containersCPUSet: map[string]string{
 					"container-with-cpuset-alloc-name":     "2-4",
+					"init-container-with-cpu-share-name":   "0-1,5-7",
+					"container-with-cpu-share-name":        "0-1,5-7",
 					"container-with-bad-cpuset-alloc-name": "",
 				},
 				sandboxCPUSet: map[string]string{
 					"pod-with-cpuset-alloc-uid":     "2-4",
+					"pod-cpu-share-uid":             "0-1,5-7",
 					"pod-with-bad-cpuset-alloc-uid": "",
 				},
 			},
@@ -693,6 +947,11 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 			// init cgroups cpuset file
 			for _, testPod := range tt.args.pods {
 				podMeta := podUIDMetas[string(testPod.pod.UID)]
+				for _, initContainerStat := range podMeta.Pod.Status.InitContainerStatuses {
+					containerPath, err := koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, initContainerStat.ContainerID)
+					assert.NoError(t, err, "get init container cgroup path during init container cpuset")
+					initCPUSet(containerPath, "", testHelper)
+				}
 				for _, containerStat := range podMeta.Pod.Status.ContainerStatuses {
 					containerPath, err := koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, containerStat.ContainerID)
 					assert.NoError(t, err, "get container cgroup path during init container cpuset")
@@ -717,7 +976,7 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 				}
 			}
 
-			p := &cpusetPlugin{executor: resourceexecutor.NewResourceUpdateExecutor()}
+			p := &cpusetPlugin{executor: resourceexecutor.NewResourceUpdateExecutor(), rule: tt.args.rule}
 			stop := make(chan struct{})
 			defer func() { close(stop) }()
 			p.executor.Run(stop)
@@ -736,6 +995,14 @@ func Test_cpusetPlugin_ruleUpdateCbForPods(t *testing.T) {
 
 			for _, testPod := range tt.args.pods {
 				podMeta := podUIDMetas[string(testPod.pod.UID)]
+				for _, initContainerStat := range podMeta.Pod.Status.InitContainerStatuses {
+					containerPath, err := koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, initContainerStat.ContainerID)
+					assert.NoError(t, err, "get init contaienr cgorup path during check container cpuset")
+					gotCPUSet := getCPUSet(containerPath, testHelper)
+					assert.Equal(t, tt.wants.containersCPUSet[initContainerStat.Name], gotCPUSet,
+						"container cpuset after callback should be equal")
+				}
+
 				for _, containerStat := range podMeta.Pod.Status.ContainerStatuses {
 					containerPath, err := koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, containerStat.ContainerID)
 					assert.NoError(t, err, "get contaienr cgorup path during check container cpuset")

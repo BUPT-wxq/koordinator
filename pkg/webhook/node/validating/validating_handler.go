@@ -19,15 +19,16 @@ package validating
 import (
 	"context"
 	"net/http"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/koordinator-sh/koordinator/pkg/util"
+	"github.com/koordinator-sh/koordinator/pkg/webhook/metrics"
 	"github.com/koordinator-sh/koordinator/pkg/webhook/node/plugins"
 	nodesloconfig "github.com/koordinator-sh/koordinator/pkg/webhook/node/plugins/sloconfig"
 )
@@ -41,8 +42,11 @@ type NodeValidatingHandler struct {
 	Decoder *admission.Decoder
 }
 
-func NewNodeValidatingHandler() *NodeValidatingHandler {
-	handler := &NodeValidatingHandler{}
+func NewNodeValidatingHandler(c client.Client, d *admission.Decoder) *NodeValidatingHandler {
+	handler := &NodeValidatingHandler{
+		Client:  c,
+		Decoder: d,
+	}
 	return handler
 }
 
@@ -96,9 +100,14 @@ func (h *NodeValidatingHandler) Handle(ctx context.Context, req admission.Reques
 	pls := h.getPlugins()
 
 	for _, plugin := range pls {
+		start := time.Now()
 		if err = plugin.Validate(ctx, req, obj, oldObj); err != nil {
+			metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+				metrics.Node, string(req.Operation), err, plugin.Name(), time.Since(start).Seconds())
 			return admission.Errored(http.StatusBadRequest, err)
 		}
+		metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+			metrics.Node, string(req.Operation), nil, plugin.Name(), time.Since(start).Seconds())
 	}
 
 	return admission.ValidationResponse(true, "")
@@ -108,7 +117,7 @@ func (h *NodeValidatingHandler) getPlugins() []plugins.NodePlugin {
 	return []plugins.NodePlugin{nodesloconfig.NewPlugin(h.Decoder, h.Client)}
 }
 
-var _ inject.Client = &NodeValidatingHandler{}
+// var _ inject.Client = &NodeValidatingHandler{}
 
 // InjectClient injects the client into the ValidatingHandler
 func (h *NodeValidatingHandler) InjectClient(c client.Client) error {
@@ -116,7 +125,7 @@ func (h *NodeValidatingHandler) InjectClient(c client.Client) error {
 	return nil
 }
 
-var _ admission.DecoderInjector = &NodeValidatingHandler{}
+// var _ admission.DecoderInjector = &NodeValidatingHandler{}
 
 // InjectDecoder injects the decoder into the ValidatingHandler
 func (h *NodeValidatingHandler) InjectDecoder(d *admission.Decoder) error {

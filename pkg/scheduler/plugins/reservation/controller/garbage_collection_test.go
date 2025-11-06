@@ -31,6 +31,7 @@ import (
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
 	koordfake "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned/fake"
 	koordinformers "github.com/koordinator-sh/koordinator/pkg/client/informers/externalversions"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 )
 
 func TestGC(t *testing.T) {
@@ -55,6 +56,24 @@ func TestGC(t *testing.T) {
 		Status: schedulingv1alpha1.ReservationStatus{
 			Phase:    schedulingv1alpha1.ReservationAvailable,
 			NodeName: "test-node",
+		},
+	}
+	succeededReservation := &schedulingv1alpha1.Reservation{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:  uuid.NewUUID(),
+			Name: "succededReservation",
+		},
+		Status: schedulingv1alpha1.ReservationStatus{
+			Phase: schedulingv1alpha1.ReservationSucceeded,
+			Conditions: []schedulingv1alpha1.ReservationCondition{
+				{
+					Type:               schedulingv1alpha1.ReservationConditionReady,
+					Status:             schedulingv1alpha1.ConditionStatusFalse,
+					Reason:             schedulingv1alpha1.ReasonReservationSucceeded,
+					LastProbeTime:      metav1.Time{Time: metav1.Now().Add(-48 * time.Hour)},
+					LastTransitionTime: metav1.Time{Time: metav1.Now().Add(-48 * time.Hour)},
+				},
+			},
 		},
 	}
 	normalReservation := &schedulingv1alpha1.Reservation{
@@ -86,6 +105,7 @@ func TestGC(t *testing.T) {
 
 	reservations := []*schedulingv1alpha1.Reservation{
 		shouldExpireReservation,
+		succeededReservation,
 		normalReservation,
 		missingNodeReservation,
 	}
@@ -102,7 +122,7 @@ func TestGC(t *testing.T) {
 	_, err := fakeClientSet.CoreV1().Nodes().Create(context.TODO(), node, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	controller := New(sharedInformerFactory, koordSharedInformerFactory, fakeKoordClientSet, 0)
+	controller := New(sharedInformerFactory, koordSharedInformerFactory, fakeClientSet, fakeKoordClientSet, &config.ReservationArgs{})
 
 	sharedInformerFactory.Start(nil)
 	koordSharedInformerFactory.Start(nil)
@@ -110,10 +130,10 @@ func TestGC(t *testing.T) {
 	koordSharedInformerFactory.WaitForCacheSync(nil)
 
 	for _, v := range reservations {
-		_, err := controller.sync(v.Name)
+		_, err := controller.sync(getReservationKey(v))
 		assert.NoError(t, err)
 	}
-	time.Sleep(1 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	controller.gcReservations()
 
 	reservationList, err := fakeKoordClientSet.SchedulingV1alpha1().Reservations().List(context.TODO(), metav1.ListOptions{})
@@ -133,7 +153,7 @@ func TestGC(t *testing.T) {
 	_, err = fakeKoordClientSet.SchedulingV1alpha1().Reservations().UpdateStatus(context.TODO(), expiredReservation, metav1.UpdateOptions{})
 	assert.NoError(t, err)
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	controller.gcReservations()
 	reservationList, err = fakeKoordClientSet.SchedulingV1alpha1().Reservations().List(context.TODO(), metav1.ListOptions{})
 	assert.NoError(t, err)

@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ koordlet, koord-manager, koord-scheduler, koord-descheduler ]
+        target: [ koordlet, koord-manager, koord-scheduler, koord-descheduler, koord-device-daemon ]
     env:
       GITHUB_REG: ghcr.io
       ALIYUN_BJ_REG: registry.cn-beijing.aliyuncs.com
@@ -73,7 +73,7 @@ jobs:
       - name: Fetch all tags
         run: git fetch --force --tags
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           cache: false
           go-version-file: go.mod

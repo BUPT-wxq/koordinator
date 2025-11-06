@@ -64,6 +64,18 @@ const (
 	// BEMemoryEvict evict best-effort pod based on node memory usage.
 	BEMemoryEvict featuregate.Feature = "BEMemoryEvict"
 
+	// owner: @lijunxin559
+	// alpha: v1.7
+	//
+	// CPUEvict evicts those configured priority pods when node lack of resource.
+	CPUEvict featuregate.Feature = "CPUEvict"
+
+	// owner: @lijunxin559
+	// alpha: v1.7
+	//
+	// MemoryEvict evicts those configured priority pods when node lack of resource.
+	MemoryEvict featuregate.Feature = "MemoryEvict"
+
 	// owner: @saintube @zwzhang0107
 	// alpha: v0.2
 	// beta: v1.1
@@ -104,6 +116,12 @@ const (
 	// Accelerators enables GPU related feature in koordlet. Only Nvidia GPUs supported.
 	Accelerators featuregate.Feature = "Accelerators"
 
+	// owner: @ZiMengSheng
+	// alpha: v1.6
+	//
+	// NetDevices enables RDMA related feature in koordlet.
+	RDMADevices featuregate.Feature = "RDMADevices"
+
 	// owner: @songtao98 @zwzhang0107
 	// alpha: v1.0
 	//
@@ -115,6 +133,12 @@ const (
 	//
 	// Libpfm4 enables libpfm4 feature of koordlet.
 	Libpfm4 featuregate.Feature = "Libpfm4"
+
+	// owner: @Rouzip
+	// alpha: v0.1
+	//
+	// ResctrlCollector enables resctrl collector feature of koordlet.
+	ResctrlCollector featuregate.Feature = "ResctrlCollector"
 
 	// owner: @songtao98 @zwzhang0107
 	// alpha: v1.0
@@ -133,6 +157,27 @@ const (
 	//
 	// ColdPageCollector enables coldPageCollector feature of koordlet.
 	ColdPageCollector featuregate.Feature = "ColdPageCollector"
+
+	// HugePageReport enables hugepage collector feature of koordlet.
+	// This feature supports reporting of hugepages.
+	// The koord-scheduler will allocate hugepage information based on the user's hugepage request and add it to the Pod's annotations.
+	// Format: scheduling.koordinator.sh/resource-status: '{"numaNodeResources":[{"node":1,"resources":{"hugepages-1Gi":"50Gi"}}]}'.
+	// Backend applications can enable the hugepages based on the allocation results.
+	// For example, the CSI mounts the pre-allocated hugepages into the pod.
+	HugePageReport featuregate.Feature = "HugePageReport"
+
+	// owner: @ZiMengSheng
+	// alpha: v1.6
+	//
+	// PodResourcesProxy enabled hooked podResources of kubelet provided by koordlet.
+	// It provides a grpc service to enable discovery of pod resources allocated by koordinator system.
+	PodResourcesProxy featuregate.Feature = "PodResourcesProxy"
+
+	// owner: @qinfustu
+	// alpha v1.7
+	//
+	// HamiCoreVGPUMonitor enables the vGPU monitoring for HAMi-core.
+	HamiCoreVGPUMonitor featuregate.Feature = "HamiCoreVGPUMonitor"
 )
 
 func init() {
@@ -149,18 +194,25 @@ var (
 		BECPUSuppress:          {Default: true, PreRelease: featuregate.Beta},
 		BECPUManager:           {Default: false, PreRelease: featuregate.Alpha},
 		BECPUEvict:             {Default: false, PreRelease: featuregate.Alpha},
+		CPUEvict:               {Default: false, PreRelease: featuregate.Alpha},
 		BEMemoryEvict:          {Default: false, PreRelease: featuregate.Alpha},
+		MemoryEvict:            {Default: false, PreRelease: featuregate.Alpha},
 		CPUBurst:               {Default: true, PreRelease: featuregate.Beta},
 		SystemConfig:           {Default: false, PreRelease: featuregate.Alpha},
 		RdtResctrl:             {Default: true, PreRelease: featuregate.Beta},
+		ResctrlCollector:       {Default: false, PreRelease: featuregate.Alpha},
 		CgroupReconcile:        {Default: false, PreRelease: featuregate.Alpha},
 		NodeTopologyReport:     {Default: true, PreRelease: featuregate.Beta},
 		Accelerators:           {Default: false, PreRelease: featuregate.Alpha},
+		RDMADevices:            {Default: false, PreRelease: featuregate.Alpha},
 		CPICollector:           {Default: false, PreRelease: featuregate.Alpha},
 		Libpfm4:                {Default: false, PreRelease: featuregate.Alpha},
 		PSICollector:           {Default: false, PreRelease: featuregate.Alpha},
 		BlkIOReconcile:         {Default: false, PreRelease: featuregate.Alpha},
 		ColdPageCollector:      {Default: false, PreRelease: featuregate.Alpha},
+		HugePageReport:         {Default: false, PreRelease: featuregate.Alpha},
+		PodResourcesProxy:      {Default: false, PreRelease: featuregate.Alpha},
+		HamiCoreVGPUMonitor:    {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -172,7 +224,7 @@ func IsFeatureDisabled(nodeSLO *slov1alpha1.NodeSLO, feature featuregate.Feature
 
 	spec := nodeSLO.Spec
 	switch feature {
-	case BECPUSuppress, BEMemoryEvict, BECPUEvict:
+	case BECPUSuppress, BEMemoryEvict, BECPUEvict, CPUEvict, MemoryEvict:
 		if spec.ResourceUsedThresholdWithBE == nil || spec.ResourceUsedThresholdWithBE.Enable == nil {
 			return true, fmt.Errorf("cannot parse feature config for invalid nodeSLO %v", nodeSLO)
 		}

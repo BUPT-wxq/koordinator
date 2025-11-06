@@ -47,12 +47,12 @@ func TestPolicyRestrictedCanAdmitPodResult(t *testing.T) {
 	}{
 		{
 			name:     "Preferred is set to false in topology hints",
-			hint:     NUMATopologyHint{nil, false, 0},
+			hint:     NUMATopologyHint{nil, false, false, 0},
 			expected: false,
 		},
 		{
 			name:     "Preferred is set to true in topology hints",
-			hint:     NUMATopologyHint{nil, true, 0},
+			hint:     NUMATopologyHint{nil, false, true, 0},
 			expected: true,
 		},
 	}
@@ -69,7 +69,7 @@ func TestPolicyRestrictedCanAdmitPodResult(t *testing.T) {
 }
 
 func TestPolicyRestrictedMerge(t *testing.T) {
-	numaNodes := []int{0, 1}
+	numaNodes := []int{0, 1, 2, 3}
 	policy := NewRestrictedPolicy(numaNodes)
 
 	tcases := commonPolicyMergeTestCases(numaNodes)

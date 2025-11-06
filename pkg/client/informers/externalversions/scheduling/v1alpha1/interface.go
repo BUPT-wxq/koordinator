@@ -24,12 +24,16 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
+	// ClusterNetworkTopologies returns a ClusterNetworkTopologyInformer.
+	ClusterNetworkTopologies() ClusterNetworkTopologyInformer
 	// Devices returns a DeviceInformer.
 	Devices() DeviceInformer
 	// PodMigrationJobs returns a PodMigrationJobInformer.
 	PodMigrationJobs() PodMigrationJobInformer
 	// Reservations returns a ReservationInformer.
 	Reservations() ReservationInformer
+	// ScheduleExplanations returns a ScheduleExplanationInformer.
+	ScheduleExplanations() ScheduleExplanationInformer
 }
 
 type version struct {
@@ -41,6 +45,11 @@ type version struct {
 // New returns a new Interface.
 func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+}
+
+// ClusterNetworkTopologies returns a ClusterNetworkTopologyInformer.
+func (v *version) ClusterNetworkTopologies() ClusterNetworkTopologyInformer {
+	return &clusterNetworkTopologyInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // Devices returns a DeviceInformer.
@@ -56,4 +65,9 @@ func (v *version) PodMigrationJobs() PodMigrationJobInformer {
 // Reservations returns a ReservationInformer.
 func (v *version) Reservations() ReservationInformer {
 	return &reservationInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// ScheduleExplanations returns a ScheduleExplanationInformer.
+func (v *version) ScheduleExplanations() ScheduleExplanationInformer {
+	return &scheduleExplanationInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

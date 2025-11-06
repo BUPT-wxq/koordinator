@@ -45,22 +45,6 @@ const (
 	HTTPSScheme = "https"
 )
 
-type StatesInformer interface {
-	Run(stopCh <-chan struct{}) error
-	HasSynced() bool
-
-	GetNode() *corev1.Node
-	GetNodeSLO() *slov1alpha1.NodeSLO
-
-	GetAllPods() []*statesinformer.PodMeta
-
-	GetNodeTopo() *topov1alpha1.NodeResourceTopology
-
-	GetVolumeName(pvcNamespace, pvcName string) string
-
-	RegisterCallbacks(objType statesinformer.RegisterType, name, description string, callbackFn statesinformer.UpdateCbFn)
-}
-
 type PluginName string
 
 type PluginOption struct {
@@ -101,9 +85,11 @@ type informerPlugin interface {
 	HasSynced() bool
 }
 
+var _ statesinformer.StatesInformer = &statesInformer{}
+
 // TODO merge all clients into one struct
 func NewStatesInformer(config *Config, kubeClient clientset.Interface, crdClient koordclientset.Interface, topologyClient topologyclientset.Interface,
-	metricsCache metriccache.MetricCache, nodeName string, schedulingClient schedv1alpha1.SchedulingV1alpha1Interface, predictorFactory prediction.PredictorFactory) StatesInformer {
+	metricsCache metriccache.MetricCache, nodeName string, schedulingClient schedv1alpha1.SchedulingV1alpha1Interface, predictorFactory prediction.PredictorFactory) statesinformer.StatesInformer {
 	opt := &PluginOption{
 		config:      config,
 		KubeClient:  kubeClient,
@@ -149,7 +135,6 @@ func (s *statesInformer) Run(stopCh <-chan struct{}) error {
 
 	klog.V(2).Infof("starting callback runner")
 	s.states.callbackRunner.Setup(s)
-	go s.states.callbackRunner.Start(stopCh)
 
 	klog.V(2).Infof("starting informer plugins")
 	s.setupPlugins()
@@ -169,6 +154,11 @@ func (s *statesInformer) Run(stopCh <-chan struct{}) error {
 			go s.gpuHealCheck(stopCh)
 		}
 	}
+
+	// start callback runner after informers synced
+	// since some callbacks needs the integrated input to execute, e.g. valid pods list
+	// the initial callback events will not be missing since the callback channels are buffered
+	go s.states.callbackRunner.Start(stopCh)
 
 	klog.Infof("start states informer successfully")
 	s.started.Store(true)
@@ -219,6 +209,16 @@ func (s *statesInformer) GetNodeSLO() *slov1alpha1.NodeSLO {
 		return nil
 	}
 	return nodeSLOInformer.GetNodeSLO()
+}
+
+func (s *statesInformer) GetNodeMetricSpec() *slov1alpha1.NodeMetricSpec {
+	nodeMetricInformerIf := s.states.informerPlugins[nodeMetricInformerName]
+	nodeMetricInformer, ok := nodeMetricInformerIf.(*nodeMetricInformer)
+	if !ok {
+		klog.Errorf("node metric informer format error")
+		return nil
+	}
+	return nodeMetricInformer.getNodeMetricSpec()
 }
 
 func (s *statesInformer) GetNodeTopo() *topov1alpha1.NodeResourceTopology {

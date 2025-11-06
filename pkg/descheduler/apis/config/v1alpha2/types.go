@@ -68,6 +68,9 @@ type DeschedulerConfiguration struct {
 
 	// MaxNoOfPodsToEvictPerNamespace restricts maximum of pods to be evicted per namespace.
 	MaxNoOfPodsToEvictPerNamespace *uint `json:"maxNoOfPodsToEvictPerNamespace,omitempty"`
+
+	// MaxNoOfPodsToTotal restricts maximum of pods to be evicted total.
+	MaxNoOfPodsToEvictTotal *uint `json:"maxNoOfPodsToEvictTotal,omitempty"`
 }
 
 // DecodeNestedObjects decodes plugin args for known types.
@@ -100,9 +103,10 @@ func (c *DeschedulerConfiguration) EncodeNestedObjects(e runtime.Encoder) error 
 
 // DeschedulerProfile is a descheduling profile.
 type DeschedulerProfile struct {
-	Name         string         `json:"name,omitempty"`
-	PluginConfig []PluginConfig `json:"pluginConfig,omitempty"`
-	Plugins      *Plugins       `json:"plugins,omitempty"`
+	Name         string                `json:"name,omitempty"`
+	PluginConfig []PluginConfig        `json:"pluginConfig,omitempty"`
+	Plugins      *Plugins              `json:"plugins,omitempty"`
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
 type Plugins struct {

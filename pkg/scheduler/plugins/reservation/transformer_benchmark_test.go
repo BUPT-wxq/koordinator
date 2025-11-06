@@ -25,8 +25,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	schedulertesting "k8s.io/kubernetes/pkg/scheduler/testing"
 	"k8s.io/utils/pointer"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
@@ -36,23 +40,61 @@ import (
 
 func BenchmarkBeforePrefilterWithMatchedPod(b *testing.B) {
 	var nodes []*corev1.Node
+	var pods []*corev1.Pod
+	var preFilterNodeNames []string
 	for i := 0; i < 1024; i++ {
-		nodes = append(nodes, &corev1.Node{
+		node := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("node-%d", i),
+				Labels: map[string]string{
+					"zone": fmt.Sprintf("zone-%d", i%2),
+				},
 			},
 			Status: corev1.NodeStatus{
 				Allocatable: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("32"),
-					corev1.ResourceMemory: resource.MustParse("64Gi"),
+					corev1.ResourceCPU:    resource.MustParse("40"),
+					corev1.ResourceMemory: resource.MustParse("80Gi"),
 				},
 			},
-		})
+		}
+		nodes = append(nodes, node)
+		if i%16 == 0 {
+			preFilterNodeNames = append(preFilterNodeNames, node.Name)
+		}
+
+		for j := 0; j < 8; j++ {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pod-%d-%d", i, j),
+					Namespace: "default",
+					UID:       types.UID(fmt.Sprintf("%d-%d", i, j)),
+				},
+				Spec: corev1.PodSpec{
+					NodeName: fmt.Sprintf("node-%d", i),
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			}
+			pods = append(pods, pod)
+		}
 	}
-	suit := newPluginTestSuitWith(b, nil, nodes)
+	suit := newPluginTestSuitWith(b, pods, nodes)
 	p, err := suit.pluginFactory()
 	assert.NoError(b, err)
 	pl := p.(*Plugin)
+	fakePreFilterPl := schedulertesting.FakePreFilterPlugin{
+		Result: &framework.PreFilterResult{
+			NodeNames: sets.New[string](preFilterNodeNames...),
+		},
+	}
 
 	reservePods := map[string]*corev1.Pod{}
 	for i, node := range nodes {
@@ -105,7 +147,7 @@ func BenchmarkBeforePrefilterWithMatchedPod(b *testing.B) {
 		reservePod := reservationutil.NewReservePod(reservation)
 		reservePods[string(reservePod.UID)] = reservePod
 		nodeInfo.AddPod(reservePod)
-		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(reservePod))
+		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(klog.Background(), reservePod))
 	}
 
 	pod := &corev1.Pod{
@@ -127,6 +169,37 @@ func BenchmarkBeforePrefilterWithMatchedPod(b *testing.B) {
 					},
 				},
 			},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "zone",
+										Operator: corev1.NodeSelectorOpIn,
+										Values: []string{
+											"zone-0",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+				{
+					MaxSkew:           1,
+					TopologyKey:       corev1.LabelHostname,
+					WhenUnsatisfiable: corev1.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"test-reservation": "true",
+						},
+					},
+				},
+			},
 		},
 	}
 	err = apiext.SetReservationAffinity(pod, &apiext.ReservationAffinity{
@@ -143,39 +216,89 @@ func BenchmarkBeforePrefilterWithMatchedPod(b *testing.B) {
 		assert.True(b, restored)
 		assert.True(b, status.IsSuccess())
 
+		preFilterResult, status := pl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult1, status := fakePreFilterPl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+		preFilterResult = preFilterResult.Merge(preFilterResult1)
+
+		status = pl.AfterPreFilter(context.TODO(), cycleState, pod, preFilterResult)
+		assert.True(b, status.IsSuccess())
+
+		b.StopTimer()
 		sd := getStateData(cycleState)
 		for _, v := range sd.nodeReservationStates {
 			nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(v.nodeName)
 			assert.NoError(b, err)
-			for _, ri := range v.matched {
+			for _, ri := range v.matchedOrIgnored {
 				p := reservePods[string(ri.UID())]
 				if p != nil {
 					nodeInfo.AddPod(p)
 				}
 			}
 		}
+		b.StartTimer()
 	}
 }
 
 func BenchmarkBeforePrefilterWithUnmatchedPod(b *testing.B) {
 	var nodes []*corev1.Node
+	var pods []*corev1.Pod
+	var preFilterNodeNames []string
 	for i := 0; i < 1024; i++ {
-		nodes = append(nodes, &corev1.Node{
+		node := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("node-%d", i),
+				Labels: map[string]string{
+					"zone": fmt.Sprintf("zone-%d", i%2),
+				},
 			},
 			Status: corev1.NodeStatus{
 				Allocatable: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("32"),
-					corev1.ResourceMemory: resource.MustParse("64Gi"),
+					corev1.ResourceCPU:    resource.MustParse("40"),
+					corev1.ResourceMemory: resource.MustParse("80Gi"),
 				},
 			},
-		})
+		}
+		nodes = append(nodes, node)
+		if i%16 == 0 {
+			preFilterNodeNames = append(preFilterNodeNames, node.Name)
+		}
+
+		for j := 0; j < 8; j++ {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pod-%d-%d", i, j),
+					Namespace: "default",
+					UID:       types.UID(fmt.Sprintf("%d-%d", i, j)),
+				},
+				Spec: corev1.PodSpec{
+					NodeName: fmt.Sprintf("node-%d", i),
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			}
+			pods = append(pods, pod)
+		}
 	}
-	suit := newPluginTestSuitWith(b, nil, nodes)
+	suit := newPluginTestSuitWith(b, pods, nodes)
 	p, err := suit.pluginFactory()
 	assert.NoError(b, err)
 	pl := p.(*Plugin)
+	fakePreFilterPl := schedulertesting.FakePreFilterPlugin{
+		Result: &framework.PreFilterResult{
+			NodeNames: sets.New[string](preFilterNodeNames...),
+		},
+	}
 
 	for i, node := range nodes {
 		reservation := &schedulingv1alpha1.Reservation{
@@ -222,34 +345,37 @@ func BenchmarkBeforePrefilterWithUnmatchedPod(b *testing.B) {
 			},
 		}
 		pl.reservationCache.updateReservation(reservation)
-		assignedPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				UID:       uuid.NewUUID(),
-				Name:      fmt.Sprintf("pod-%s", reservation.Name),
-				Namespace: "default",
-			},
-			Spec: corev1.PodSpec{
-				NodeName: node.Name,
-				Containers: []corev1.Container{
-					{
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("4"),
-								corev1.ResourceMemory: resource.MustParse("8Gi"),
-							},
-						},
-					},
-				},
-			},
-		}
-		pl.reservationCache.updatePod(reservation.UID, nil, assignedPod)
 		nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(node.Name)
 		assert.NoError(b, err)
 		reservePod := reservationutil.NewReservePod(reservation)
 		nodeInfo.AddPod(reservePod)
-		nodeInfo.AddPod(assignedPod)
-		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(reservePod))
-		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(assignedPod))
+		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(klog.Background(), reservePod))
+
+		for j := 0; j < 4; j++ {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					UID:       uuid.NewUUID(),
+					Name:      fmt.Sprintf("pod-%s-%d", reservation.Name, j),
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					NodeName: node.Name,
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			}
+			pl.reservationCache.updatePod(reservation.UID, nil, pod)
+			nodeInfo.AddPod(pod)
+			assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(klog.Background(), pod))
+		}
 	}
 
 	pod := &corev1.Pod{
@@ -268,6 +394,37 @@ func BenchmarkBeforePrefilterWithUnmatchedPod(b *testing.B) {
 					},
 				},
 			},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "zone",
+										Operator: corev1.NodeSelectorOpIn,
+										Values: []string{
+											"zone-0",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+				{
+					MaxSkew:           1,
+					TopologyKey:       corev1.LabelHostname,
+					WhenUnsatisfiable: corev1.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"test-reservation": "true",
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -276,6 +433,427 @@ func BenchmarkBeforePrefilterWithUnmatchedPod(b *testing.B) {
 		cycleState := framework.NewCycleState()
 		_, restored, status := pl.BeforePreFilter(context.TODO(), cycleState, pod)
 		assert.True(b, restored)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult, status := pl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult1, status := fakePreFilterPl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+		preFilterResult = preFilterResult.Merge(preFilterResult1)
+
+		status = pl.AfterPreFilter(context.TODO(), cycleState, pod, preFilterResult)
+		assert.True(b, status.IsSuccess())
+	}
+}
+
+func BenchmarkBeforePrefilterWithMatchedPodEnableLazyReservationRestore(b *testing.B) {
+	var nodes []*corev1.Node
+	var pods []*corev1.Pod
+	var preFilterNodeNames []string
+	for i := 0; i < 1024; i++ {
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("node-%d", i),
+				Labels: map[string]string{
+					"zone": fmt.Sprintf("zone-%d", i%2),
+				},
+			},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("40"),
+					corev1.ResourceMemory: resource.MustParse("80Gi"),
+				},
+			},
+		}
+		nodes = append(nodes, node)
+		if i%16 == 0 {
+			preFilterNodeNames = append(preFilterNodeNames, node.Name)
+		}
+
+		for j := 0; j < 8; j++ {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pod-%d-%d", i, j),
+					Namespace: "default",
+					UID:       types.UID(fmt.Sprintf("%d-%d", i, j)),
+				},
+				Spec: corev1.PodSpec{
+					NodeName: fmt.Sprintf("node-%d", i),
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			}
+			pods = append(pods, pod)
+		}
+	}
+	suit := newPluginTestSuitWith(b, pods, nodes)
+	p, err := suit.pluginFactory()
+	assert.NoError(b, err)
+	pl := p.(*Plugin)
+	pl.enableLazyReservationRestore = true
+	fakePreFilterPl := schedulertesting.FakePreFilterPlugin{
+		Result: &framework.PreFilterResult{
+			NodeNames: sets.New[string](preFilterNodeNames...),
+		},
+	}
+
+	reservePods := map[string]*corev1.Pod{}
+	for i, node := range nodes {
+		reservation := &schedulingv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{
+				UID:  uuid.NewUUID(),
+				Name: fmt.Sprintf("reservation-%d", i),
+				Labels: map[string]string{
+					"test-reservation": "true",
+				},
+			},
+			Spec: schedulingv1alpha1.ReservationSpec{
+				AllocateOnce: pointer.Bool(false),
+				Owners: []schedulingv1alpha1.ReservationOwner{
+					{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"test-reservation": "true",
+							},
+						},
+					},
+				},
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("32"),
+										corev1.ResourceMemory: resource.MustParse("64Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Status: schedulingv1alpha1.ReservationStatus{
+				Phase:    schedulingv1alpha1.ReservationAvailable,
+				NodeName: node.Name,
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("32"),
+					corev1.ResourceMemory: resource.MustParse("64Gi"),
+				},
+			},
+		}
+		pl.reservationCache.updateReservation(reservation)
+		nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(node.Name)
+		assert.NoError(b, err)
+		reservePod := reservationutil.NewReservePod(reservation)
+		reservePods[string(reservePod.UID)] = reservePod
+		nodeInfo.AddPod(reservePod)
+		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(klog.Background(), reservePod))
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"test-reservation": "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("32"),
+							corev1.ResourceMemory: resource.MustParse("64Gi"),
+						},
+					},
+				},
+			},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "zone",
+										Operator: corev1.NodeSelectorOpIn,
+										Values: []string{
+											"zone-0",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+				{
+					MaxSkew:           1,
+					TopologyKey:       corev1.LabelHostname,
+					WhenUnsatisfiable: corev1.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"test-reservation": "true",
+						},
+					},
+				},
+			},
+		},
+	}
+	err = apiext.SetReservationAffinity(pod, &apiext.ReservationAffinity{
+		ReservationSelector: map[string]string{
+			"test-reservation": "true",
+		},
+	})
+	assert.NoError(b, err)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cycleState := framework.NewCycleState()
+		_, restored, status := pl.BeforePreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, restored)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult, status := pl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult1, status := fakePreFilterPl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+		preFilterResult = preFilterResult.Merge(preFilterResult1)
+
+		status = pl.AfterPreFilter(context.TODO(), cycleState, pod, preFilterResult)
+		assert.True(b, status.IsSuccess())
+
+		b.StopTimer()
+		sd := getStateData(cycleState)
+		for _, v := range sd.nodeReservationStates {
+			nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(v.nodeName)
+			assert.NoError(b, err)
+			for _, ri := range v.matchedOrIgnored {
+				p := reservePods[string(ri.UID())]
+				if p != nil {
+					nodeInfo.AddPod(p)
+				}
+			}
+		}
+		b.StartTimer()
+	}
+}
+
+func BenchmarkBeforePrefilterWithUnmatchedPodEnableLazyReservationRestore(b *testing.B) {
+	var nodes []*corev1.Node
+	var pods []*corev1.Pod
+	var preFilterNodeNames []string
+	for i := 0; i < 1024; i++ {
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("node-%d", i),
+				Labels: map[string]string{
+					"zone": fmt.Sprintf("zone-%d", i%2),
+				},
+			},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("40"),
+					corev1.ResourceMemory: resource.MustParse("80Gi"),
+				},
+			},
+		}
+		nodes = append(nodes, node)
+		if i%16 == 0 {
+			preFilterNodeNames = append(preFilterNodeNames, node.Name)
+		}
+
+		for j := 0; j < 8; j++ {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pod-%d-%d", i, j),
+					Namespace: "default",
+					UID:       types.UID(fmt.Sprintf("%d-%d", i, j)),
+				},
+				Spec: corev1.PodSpec{
+					NodeName: fmt.Sprintf("node-%d", i),
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			}
+			pods = append(pods, pod)
+		}
+	}
+	suit := newPluginTestSuitWith(b, pods, nodes)
+	p, err := suit.pluginFactory()
+	assert.NoError(b, err)
+	pl := p.(*Plugin)
+	pl.enableLazyReservationRestore = true
+	fakePreFilterPl := schedulertesting.FakePreFilterPlugin{
+		Result: &framework.PreFilterResult{
+			NodeNames: sets.New[string](preFilterNodeNames...),
+		},
+	}
+
+	for i, node := range nodes {
+		reservation := &schedulingv1alpha1.Reservation{
+			ObjectMeta: metav1.ObjectMeta{
+				UID:  uuid.NewUUID(),
+				Name: fmt.Sprintf("reservation-%d", i),
+				Labels: map[string]string{
+					"test-reservation": "true",
+				},
+			},
+			Spec: schedulingv1alpha1.ReservationSpec{
+				AllocateOnce: pointer.Bool(false),
+				Owners: []schedulingv1alpha1.ReservationOwner{
+					{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"test-reservation": "true",
+							},
+						},
+					},
+				},
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("32"),
+										corev1.ResourceMemory: resource.MustParse("64Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Status: schedulingv1alpha1.ReservationStatus{
+				Phase:    schedulingv1alpha1.ReservationAvailable,
+				NodeName: node.Name,
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("32"),
+					corev1.ResourceMemory: resource.MustParse("64Gi"),
+				},
+			},
+		}
+		pl.reservationCache.updateReservation(reservation)
+		nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(node.Name)
+		assert.NoError(b, err)
+		reservePod := reservationutil.NewReservePod(reservation)
+		nodeInfo.AddPod(reservePod)
+		assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(klog.Background(), reservePod))
+
+		for j := 0; j < 4; j++ {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					UID:       uuid.NewUUID(),
+					Name:      fmt.Sprintf("pod-%s-%d", reservation.Name, j),
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					NodeName: node.Name,
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			}
+			pl.reservationCache.updatePod(reservation.UID, nil, pod)
+			nodeInfo.AddPod(pod)
+			assert.NoError(b, pl.handle.Scheduler().GetCache().AddPod(klog.Background(), pod))
+		}
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("32"),
+							corev1.ResourceMemory: resource.MustParse("64Gi"),
+						},
+					},
+				},
+			},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "zone",
+										Operator: corev1.NodeSelectorOpIn,
+										Values: []string{
+											"zone-0",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+				{
+					MaxSkew:           1,
+					TopologyKey:       corev1.LabelHostname,
+					WhenUnsatisfiable: corev1.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"test-reservation": "true",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cycleState := framework.NewCycleState()
+		_, restored, status := pl.BeforePreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, restored)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult, status := pl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+
+		preFilterResult1, status := fakePreFilterPl.PreFilter(context.TODO(), cycleState, pod)
+		assert.True(b, status.IsSuccess())
+		preFilterResult = preFilterResult.Merge(preFilterResult1)
+
+		status = pl.AfterPreFilter(context.TODO(), cycleState, pod, preFilterResult)
 		assert.True(b, status.IsSuccess())
 	}
 }

@@ -24,8 +24,6 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/klog/v2"
-
 	"github.com/stretchr/testify/assert"
 )
 
@@ -52,6 +50,7 @@ var (
 		BlkioReadIops,
 		BlkioWriteBps,
 		BlkioWriteIops,
+		NetClsClassId,
 	}
 )
 
@@ -60,13 +59,38 @@ type FileTestUtil struct {
 	TempDir string
 	// whether to validate when writing cgroups resources
 	ValidateResource bool
+	// additional cleanup function for Config to be invoked in Cleanup()
+	CleanupFn func(config *Config)
 
-	t *testing.T
+	t testing.TB
+}
+
+type MockMonData struct {
+	CacheItems map[int]MockCacheItem
+}
+
+type MockCacheItem map[string]uint64
+
+// create mock ctrl group mon_data directory and files
+func TestingPrepareResctrlMondata(t *testing.T, sysFsRootPath, ctrlGrp string, mmd MockMonData) {
+	resctrlMonDataPath := filepath.Join(sysFsRootPath, "resctrl", ctrlGrp, "mon_data")
+	err := os.MkdirAll(resctrlMonDataPath, 0777)
+	assert.NoError(t, err)
+	for cacheId, cacheItem := range mmd.CacheItems {
+		cacheMonDir := filepath.Join(resctrlMonDataPath, fmt.Sprintf("mon_L3_%02d", cacheId))
+		err = os.MkdirAll(cacheMonDir, 0777)
+		assert.NoError(t, err)
+		for item, value := range cacheItem {
+			itemPath := filepath.Join(cacheMonDir, item)
+			err = os.WriteFile(itemPath, []byte(fmt.Sprintf("%d", value)), 0644)
+			assert.NoError(t, err)
+		}
+	}
 }
 
 // NewFileTestUtil creates a new test util for the specified subsystem.
 // NOTE: this function should be called only for testing purposes.
-func NewFileTestUtil(t *testing.T) *FileTestUtil {
+func NewFileTestUtil(t testing.TB) *FileTestUtil {
 	// NOTE: When $TMPDIR is not set, `t.TempDir()` can use different base directory on Mac OS X and Linux, which may
 	// generates too long paths to test unix socket.
 	t.Setenv("TMPDIR", "/tmp")
@@ -81,7 +105,7 @@ func NewFileTestUtil(t *testing.T) *FileTestUtil {
 	Conf.SysFSRootDir = filepath.Join(tempDir, "fs")
 	Conf.VarRunRootDir = tempDir
 
-	initSupportConfigs()
+	InitSupportConfigs()
 
 	return &FileTestUtil{
 		TempDir:          tempDir,
@@ -96,6 +120,9 @@ func (c *FileTestUtil) Cleanup() {
 		assert.NoError(c.t, err)
 	}
 	initCgroupsVersion()
+	if c.CleanupFn != nil {
+		c.CleanupFn(Conf)
+	}
 }
 
 func (c *FileTestUtil) SetResourcesSupported(supported bool, resources ...Resource) {
@@ -114,6 +141,11 @@ func (c *FileTestUtil) SetCgroupsV2(useCgroupsV2 bool) {
 
 func (c *FileTestUtil) SetValidateResource(enabled bool) {
 	c.ValidateResource = enabled
+}
+
+func (c *FileTestUtil) SetConf(setFn, cleanupFn func(conf *Config)) {
+	setFn(Conf)
+	c.CleanupFn = cleanupFn
 }
 
 // if dir contain TempDir, mkdir direct, else join with TempDir and mkdir
@@ -236,7 +268,7 @@ func (c *FileTestUtil) WriteCgroupFileContents(taskDir string, r Resource, conte
 		}
 	}
 	filePath = r.Path(taskDir)
-	klog.V(5).Infof("write %s [%s]", filePath, contents)
+	c.t.Logf("write %s [%s]", filePath, contents)
 
 	err := os.WriteFile(filePath, []byte(contents), 0644)
 	if err != nil {

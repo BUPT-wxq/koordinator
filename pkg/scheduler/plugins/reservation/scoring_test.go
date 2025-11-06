@@ -28,6 +28,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	quotav1 "k8s.io/apiserver/pkg/quota/v1"
+	apiresource "k8s.io/kubernetes/pkg/api/v1/resource"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
@@ -37,6 +39,21 @@ import (
 )
 
 func TestScore(t *testing.T) {
+	testNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+		},
+		Status: corev1.NodeStatus{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("16"),
+				corev1.ResourceMemory: resource.MustParse("128Gi"),
+			},
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("16"),
+				corev1.ResourceMemory: resource.MustParse("128Gi"),
+			},
+		},
+	}
 	reservation4C8G := &schedulingv1alpha1.Reservation{
 		ObjectMeta: metav1.ObjectMeta{
 			UID:  uuid.NewUUID(),
@@ -126,13 +143,17 @@ func TestScore(t *testing.T) {
 			name: "reservation matched but zero-request pod",
 			pod:  &corev1.Pod{},
 			reservations: []*schedulingv1alpha1.Reservation{
-				reservation2C4G,
+				reservation2C4G.DeepCopy(),
 			},
 			wantScore: framework.MinNodeScore,
 		},
 		{
 			name: "reservation matched and pod has part empty resource requests",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "test-ns",
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -147,13 +168,17 @@ func TestScore(t *testing.T) {
 				},
 			},
 			reservations: []*schedulingv1alpha1.Reservation{
-				reservation4C8G,
+				reservation4C8G.DeepCopy(),
 			},
 			wantScore: 50,
 		},
 		{
 			name: "allocated reservation matched and pod has part empty resource requests",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "test-ns",
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -168,7 +193,7 @@ func TestScore(t *testing.T) {
 				},
 			},
 			reservations: []*schedulingv1alpha1.Reservation{
-				reservation2C4G,
+				reservation2C4G.DeepCopy(),
 			},
 			allocated: map[types.UID]corev1.ResourceList{
 				reservation2C4G.UID: {
@@ -181,6 +206,10 @@ func TestScore(t *testing.T) {
 		{
 			name: "multi reservations matched and pod has part empty resource requests",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "test-ns",
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -195,47 +224,61 @@ func TestScore(t *testing.T) {
 				},
 			},
 			reservations: []*schedulingv1alpha1.Reservation{
-				reservation4C8G,
-				reservation2C4G,
+				reservation4C8G.DeepCopy(),
+				reservation2C4G.DeepCopy(),
 			},
 			wantScore: framework.MaxNodeScore,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			suit := newPluginTestSuit(t)
+			node := testNode.DeepCopy()
+			suit := newPluginTestSuitWith(t, nil, []*corev1.Node{node.DeepCopy()})
 			p, err := suit.pluginFactory()
 			assert.NoError(t, err)
 			assert.NotNil(t, p)
 			pl := p.(*Plugin)
+			for _, r := range tt.reservations {
+				_, err = suit.extenderFactory.KoordinatorClientSet().SchedulingV1alpha1().Reservations().Create(context.TODO(), r.DeepCopy(), metav1.CreateOptions{})
+				assert.NoError(t, err)
+			}
+			if tt.pod != nil {
+				_, err = suit.fw.ClientSet().CoreV1().Pods(tt.pod.Namespace).Create(context.TODO(), tt.pod.DeepCopy(), metav1.CreateOptions{})
+				assert.NoError(t, err)
+			}
 
 			cycleState := framework.NewCycleState()
 			state := &stateData{
-				nodeReservationStates: map[string]nodeReservationState{},
+				schedulingStateData: schedulingStateData{
+					nodeReservationStates: map[string]*nodeReservationState{},
+				},
 			}
+			state.podRequests = apiresource.PodRequests(tt.pod, apiresource.PodResourcesOptions{})
+			state.podRequestsResources = framework.NewResource(state.podRequests)
+			state.podResourceNames = quotav1.ResourceNames(state.podRequests)
 			for _, reservation := range tt.reservations {
 				rInfo := frameworkext.NewReservationInfo(reservation)
 				if allocated := tt.allocated[reservation.UID]; len(allocated) > 0 {
 					rInfo.Allocated = allocated
 				}
 				nodeRState := state.nodeReservationStates[reservation.Status.NodeName]
+				if nodeRState == nil {
+					nodeRState = &nodeReservationState{}
+				}
 				nodeRState.nodeName = reservation.Status.NodeName
-				nodeRState.matched = append(nodeRState.matched, rInfo)
+				nodeRState.matchedOrIgnored = append(nodeRState.matchedOrIgnored, rInfo)
 				state.nodeReservationStates[reservation.Status.NodeName] = nodeRState
 				pl.reservationCache.updateReservation(reservation)
 			}
 			cycleState.Write(stateKey, state)
 
-			status := pl.PreScore(context.TODO(), cycleState, tt.pod, []*corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-node",
-					},
-				},
-			})
-			assert.True(t, status.IsSuccess())
+			// the usage of the lister requires the informers started
+			suit.start()
 
-			score, status := pl.Score(context.TODO(), cycleState, tt.pod, "test-node")
+			status := pl.PreScore(context.TODO(), cycleState, tt.pod, []*corev1.Node{node})
+			assert.True(t, status.IsSuccess() || status.IsSkip())
+
+			score, status := pl.Score(context.TODO(), cycleState, tt.pod, node.Name)
 			assert.True(t, status.IsSuccess())
 			assert.Equal(t, tt.wantScore, score)
 		})
@@ -245,7 +288,9 @@ func TestScore(t *testing.T) {
 func TestScoreWithOrder(t *testing.T) {
 	normalPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod-1",
+			Name:      "test-pod-1",
+			Namespace: "test-ns",
+			UID:       uuid.NewUUID(),
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -296,86 +341,125 @@ func TestScoreWithOrder(t *testing.T) {
 		}
 	}
 
-	suit := newPluginTestSuit(t)
-	p, err := suit.pluginFactory()
-	assert.NoError(t, err)
-	assert.NotNil(t, p)
-	pl := p.(*Plugin)
+	t.Run("test", func(t *testing.T) {
+		var nodes []*corev1.Node
+		for i := 0; i < 4; i++ {
+			nodes = append(nodes, &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: fmt.Sprintf("test-node-%d", i+1),
+				},
+			})
+		}
+		suit := newPluginTestSuitWith(t, nil, nodes)
+		p, err := suit.pluginFactory()
+		assert.NoError(t, err)
+		assert.NotNil(t, p)
+		pl := p.(*Plugin)
 
-	state := &stateData{
-		nodeReservationStates: map[string]nodeReservationState{},
-	}
-
-	// add three Reservations to three node
-	for i := 0; i < 3; i++ {
-		reservation := reservationTemplateFn(i + 1)
-		pl.reservationCache.updateReservation(reservation)
-		rInfo := pl.reservationCache.getReservationInfoByUID(reservation.UID)
-		nodeRState := state.nodeReservationStates[reservation.Status.NodeName]
-		nodeRState.nodeName = reservation.Status.NodeName
-		nodeRState.matched = append(nodeRState.matched, rInfo)
-		state.nodeReservationStates[reservation.Status.NodeName] = nodeRState
-	}
-
-	// add Reservation with LabelReservationOrder
-	reservationWithOrder := reservationTemplateFn(4)
-	reservationWithOrder.Labels = map[string]string{
-		apiext.LabelReservationOrder: "123456",
-	}
-	pl.reservationCache.updateReservation(reservationWithOrder)
-	rInfo := pl.reservationCache.getReservationInfoByUID(reservationWithOrder.UID)
-	nodeRState := state.nodeReservationStates[reservationWithOrder.Status.NodeName]
-	nodeRState.nodeName = reservationWithOrder.Status.NodeName
-	nodeRState.matched = append(nodeRState.matched, rInfo)
-	state.nodeReservationStates[reservationWithOrder.Status.NodeName] = nodeRState
-
-	cycleState := framework.NewCycleState()
-	cycleState.Write(stateKey, state)
-
-	var nodes []*corev1.Node
-	for nodeName := range state.nodeReservationStates {
-		nodes = append(nodes, &corev1.Node{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: nodeName,
+		state := &stateData{
+			schedulingStateData: schedulingStateData{
+				nodeReservationStates: map[string]*nodeReservationState{},
 			},
-		})
-	}
+		}
+		state.podRequests = apiresource.PodRequests(normalPod, apiresource.PodResourcesOptions{})
+		state.podRequestsResources = framework.NewResource(state.podRequests)
+		state.podResourceNames = quotav1.ResourceNames(state.podRequests)
 
-	status := pl.PreScore(context.TODO(), cycleState, normalPod, nodes)
-	assert.True(t, status.IsSuccess())
-	assert.Equal(t, "test-node-4", state.preferredNode)
+		_, err = suit.fw.ClientSet().CoreV1().Pods(normalPod.Namespace).Create(context.TODO(), normalPod.DeepCopy(), metav1.CreateOptions{})
+		assert.NoError(t, err)
 
-	var scoreList framework.NodeScoreList
-	for _, v := range nodes {
-		score, status := pl.Score(context.TODO(), cycleState, normalPod, v.Name)
+		// add three Reservations to three node
+		var reservations []*schedulingv1alpha1.Reservation
+		for i := 0; i < 3; i++ {
+			reservation := reservationTemplateFn(i + 1)
+			pl.reservationCache.updateReservation(reservation)
+			rInfo := pl.reservationCache.getReservationInfoByUID(reservation.UID)
+			nodeRState := state.nodeReservationStates[reservation.Status.NodeName]
+			if nodeRState == nil {
+				nodeRState = &nodeReservationState{}
+			}
+			nodeRState.nodeName = reservation.Status.NodeName
+			nodeRState.matchedOrIgnored = append(nodeRState.matchedOrIgnored, rInfo)
+			state.nodeReservationStates[reservation.Status.NodeName] = nodeRState
+
+			_, err = suit.extenderFactory.KoordinatorClientSet().SchedulingV1alpha1().Reservations().Create(context.TODO(), reservation.DeepCopy(), metav1.CreateOptions{})
+			assert.NoError(t, err)
+			reservations = append(reservations, reservation)
+		}
+
+		// add Reservation with LabelReservationOrder
+		reservationWithOrder := reservationTemplateFn(4)
+		reservationWithOrder.Labels = map[string]string{
+			apiext.LabelReservationOrder: "123456",
+		}
+		pl.reservationCache.updateReservation(reservationWithOrder)
+		rInfo := pl.reservationCache.getReservationInfoByUID(reservationWithOrder.UID)
+		nodeRState := state.nodeReservationStates[reservationWithOrder.Status.NodeName]
+		if nodeRState == nil {
+			nodeRState = &nodeReservationState{}
+		}
+		nodeRState.nodeName = reservationWithOrder.Status.NodeName
+		nodeRState.matchedOrIgnored = append(nodeRState.matchedOrIgnored, rInfo)
+		state.nodeReservationStates[reservationWithOrder.Status.NodeName] = nodeRState
+		_, err = suit.extenderFactory.KoordinatorClientSet().SchedulingV1alpha1().Reservations().Create(context.TODO(), reservationWithOrder.DeepCopy(), metav1.CreateOptions{})
+		assert.NoError(t, err)
+		reservations = append(reservations, reservationWithOrder)
+
+		cycleState := framework.NewCycleState()
+		cycleState.Write(stateKey, state)
+
+		// the usage of the lister requires the informers started
+		suit.start()
+		// verify if the cache synced
+		podLister := suit.fw.SharedInformerFactory().Core().V1().Pods().Lister()
+		assert.NotNil(t, podLister)
+		got, err := podLister.Pods(normalPod.Namespace).Get(normalPod.Name)
+		assert.NoError(t, err)
+		assert.NotNil(t, got)
+		rLister := suit.extenderFactory.KoordinatorSharedInformerFactory().Scheduling().V1alpha1().Reservations().Lister()
+		assert.NotNil(t, rLister)
+		for i := range reservations {
+			got, err := rLister.Get(reservations[i].Name)
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+		}
+
+		status := pl.PreScore(context.TODO(), cycleState, normalPod, nodes)
 		assert.True(t, status.IsSuccess())
-		scoreList = append(scoreList, framework.NodeScore{
-			Name:  v.Name,
-			Score: score,
+		assert.Equal(t, "test-node-4", state.preferredNode)
+
+		var scoreList framework.NodeScoreList
+		for _, v := range nodes {
+			score, status := pl.Score(context.TODO(), cycleState, normalPod, v.Name)
+			assert.True(t, status.IsSuccess())
+			scoreList = append(scoreList, framework.NodeScore{
+				Name:  v.Name,
+				Score: score,
+			})
+		}
+
+		expectedNodeScoreList := framework.NodeScoreList{
+			{Name: "test-node-1", Score: framework.MaxNodeScore},
+			{Name: "test-node-2", Score: framework.MaxNodeScore},
+			{Name: "test-node-3", Score: framework.MaxNodeScore},
+			{Name: "test-node-4", Score: mostPreferredScore},
+		}
+		sort.Slice(scoreList, func(i, j int) bool {
+			return scoreList[i].Name < scoreList[j].Name
 		})
-	}
+		assert.Equal(t, expectedNodeScoreList, scoreList)
 
-	expectedNodeScoreList := framework.NodeScoreList{
-		{Name: "test-node-1", Score: framework.MaxNodeScore},
-		{Name: "test-node-2", Score: framework.MaxNodeScore},
-		{Name: "test-node-3", Score: framework.MaxNodeScore},
-		{Name: "test-node-4", Score: mostPreferredScore},
-	}
-	sort.Slice(scoreList, func(i, j int) bool {
-		return scoreList[i].Name < scoreList[j].Name
+		status = pl.ScoreExtensions().NormalizeScore(context.TODO(), cycleState, normalPod, scoreList)
+		assert.True(t, status.IsSuccess())
+
+		expectedNodeScoreList = framework.NodeScoreList{
+			{Name: "test-node-1", Score: 10},
+			{Name: "test-node-2", Score: 10},
+			{Name: "test-node-3", Score: 10},
+			{Name: "test-node-4", Score: framework.MaxNodeScore},
+		}
+		assert.Equal(t, expectedNodeScoreList, scoreList)
 	})
-	assert.Equal(t, expectedNodeScoreList, scoreList)
-
-	status = pl.ScoreExtensions().NormalizeScore(context.TODO(), cycleState, normalPod, scoreList)
-	assert.True(t, status.IsSuccess())
-
-	expectedNodeScoreList = framework.NodeScoreList{
-		{Name: "test-node-1", Score: 10},
-		{Name: "test-node-2", Score: 10},
-		{Name: "test-node-3", Score: 10},
-		{Name: "test-node-4", Score: framework.MaxNodeScore},
-	}
-	assert.Equal(t, expectedNodeScoreList, scoreList)
 }
 
 func TestPreScoreWithNominateReservation(t *testing.T) {
@@ -460,6 +544,8 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 			name: "reserve pod",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
 					Annotations: map[string]string{
 						reservationutil.AnnotationReservePod: "true",
 					},
@@ -475,6 +561,11 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 		{
 			name: "preferred reservation",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					UID:       uuid.NewUUID(),
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -495,6 +586,7 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 						Labels: map[string]string{
 							apiext.LabelReservationOrder: "100",
 						},
+						UID: "123456",
 					},
 					Spec: schedulingv1alpha1.ReservationSpec{
 						Template: &corev1.PodTemplateSpec{
@@ -513,12 +605,18 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 						},
 					},
 					Status: schedulingv1alpha1.ReservationStatus{
+						Phase:    schedulingv1alpha1.ReservationAvailable,
 						NodeName: "test-node",
+						Allocatable: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("4Gi"),
+						},
 					},
 				},
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "normal-reservation",
+						UID:  "654321",
 					},
 					Spec: schedulingv1alpha1.ReservationSpec{
 						Template: &corev1.PodTemplateSpec{
@@ -537,7 +635,12 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 						},
 					},
 					Status: schedulingv1alpha1.ReservationStatus{
+						Phase:    schedulingv1alpha1.ReservationAvailable,
 						NodeName: "test-node",
+						Allocatable: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("4Gi"),
+						},
 					},
 				},
 			},
@@ -548,6 +651,7 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 						Labels: map[string]string{
 							apiext.LabelReservationOrder: "100",
 						},
+						UID: "123456",
 					},
 					Spec: schedulingv1alpha1.ReservationSpec{
 						Template: &corev1.PodTemplateSpec{
@@ -566,7 +670,12 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 						},
 					},
 					Status: schedulingv1alpha1.ReservationStatus{
+						Phase:    schedulingv1alpha1.ReservationAvailable,
 						NodeName: "test-node",
+						Allocatable: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("4Gi"),
+						},
 					},
 				}),
 			},
@@ -575,6 +684,11 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 		{
 			name: "allocated reservation",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					UID:       uuid.NewUUID(),
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -606,6 +720,11 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 		{
 			name: "matched reservations",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					UID:       uuid.NewUUID(),
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -631,6 +750,11 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 		{
 			name: "multiple nodes have reservations",
 			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					UID:       uuid.NewUUID(),
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -659,48 +783,90 @@ func TestPreScoreWithNominateReservation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			suit := newPluginTestSuit(t)
-			plugin, err := suit.pluginFactory()
-			assert.NoError(t, err)
-			pl := plugin.(*Plugin)
-			cycleState := framework.NewCycleState()
-			state := &stateData{
-				nodeReservationStates: map[string]nodeReservationState{},
-			}
-			for _, reservation := range tt.reservations {
-				rInfo := frameworkext.NewReservationInfo(reservation)
-				if allocated := tt.allocated[reservation.UID]; len(allocated) > 0 {
-					rInfo.Allocated = allocated
-				}
-				nodeRState := state.nodeReservationStates[reservation.Status.NodeName]
-				nodeRState.nodeName = reservation.Status.NodeName
-				nodeRState.matched = append(nodeRState.matched, rInfo)
-				state.nodeReservationStates[reservation.Status.NodeName] = nodeRState
-				pl.reservationCache.updateReservation(reservation)
-			}
-			cycleState.Write(stateKey, state)
-
 			nodes := []*corev1.Node{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-node",
+					},
+					Status: corev1.NodeStatus{
+						Capacity: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("8"),
+							corev1.ResourceMemory: resource.MustParse("16Gi"),
+						},
+						Allocatable: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("8"),
+							corev1.ResourceMemory: resource.MustParse("16Gi"),
+						},
 					},
 				},
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-node-1",
 					},
+					Status: corev1.NodeStatus{
+						Capacity: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("8"),
+							corev1.ResourceMemory: resource.MustParse("16Gi"),
+						},
+						Allocatable: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("8"),
+							corev1.ResourceMemory: resource.MustParse("16Gi"),
+						},
+					},
 				},
 			}
 
+			suit := newPluginTestSuitWith(t, nil, nodes)
+			plugin, err := suit.pluginFactory()
+			assert.NoError(t, err)
+			pl := plugin.(*Plugin)
+			for _, r := range tt.reservations {
+				_, err = suit.extenderFactory.KoordinatorClientSet().SchedulingV1alpha1().Reservations().Create(context.TODO(), r.DeepCopy(), metav1.CreateOptions{})
+				assert.NoError(t, err)
+			}
+			if tt.pod != nil {
+				_, err = suit.fw.ClientSet().CoreV1().Pods(tt.pod.Namespace).Create(context.TODO(), tt.pod.DeepCopy(), metav1.CreateOptions{})
+				assert.NoError(t, err)
+			}
+
+			cycleState := framework.NewCycleState()
+			state := &stateData{
+				schedulingStateData: schedulingStateData{
+					nodeReservationStates: map[string]*nodeReservationState{},
+				},
+			}
+			state.podRequests = apiresource.PodRequests(tt.pod, apiresource.PodResourcesOptions{})
+			state.podRequestsResources = framework.NewResource(state.podRequests)
+			state.podResourceNames = quotav1.ResourceNames(state.podRequests)
+			for i := range tt.reservations {
+				reservation := tt.reservations[i]
+				rInfo := frameworkext.NewReservationInfo(reservation)
+				if allocated := tt.allocated[reservation.UID]; len(allocated) > 0 {
+					rInfo.Allocated = allocated
+				}
+				nodeRState := state.nodeReservationStates[reservation.Status.NodeName]
+				if nodeRState == nil {
+					nodeRState = &nodeReservationState{}
+				}
+				nodeRState.nodeName = reservation.Status.NodeName
+				nodeRState.matchedOrIgnored = append(nodeRState.matchedOrIgnored, rInfo)
+				state.nodeReservationStates[reservation.Status.NodeName] = nodeRState
+				pl.reservationCache.updateReservation(reservation)
+			}
+			cycleState.Write(stateKey, state)
+
+			// the usage of the lister requires the informers started
+			suit.start()
+
 			status := pl.PreScore(context.TODO(), cycleState, tt.pod, nodes)
-			assert.Equal(t, tt.wantStatus, status.IsSuccess())
+			assert.Equal(t, tt.wantStatus, status.IsSuccess() || status.IsSkip())
 
 			for nodeName, wantReservationInfo := range tt.wantReservation {
 				sort.Slice(wantReservationInfo.ResourceNames, func(i, j int) bool {
 					return wantReservationInfo.ResourceNames[i] < wantReservationInfo.ResourceNames[j]
 				})
-				rInfo := frameworkext.GetNominatedReservation(cycleState, nodeName)
+				wantReservationInfo.RefreshPreCalculated()
+				rInfo := pl.handle.GetReservationNominator().GetNominatedReservation(tt.pod, nodeName)
 				if rInfo != nil {
 					sort.Slice(rInfo.ResourceNames, func(i, j int) bool {
 						return rInfo.ResourceNames[i] < rInfo.ResourceNames[j]

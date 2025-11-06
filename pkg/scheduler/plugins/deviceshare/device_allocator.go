@@ -30,6 +30,7 @@ import (
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/schedulingphase"
 	"github.com/koordinator-sh/koordinator/pkg/util/bitmask"
 )
 
@@ -37,7 +38,7 @@ var deviceHandlers = map[schedulingv1alpha1.DeviceType]DeviceHandler{}
 var deviceAllocators = map[schedulingv1alpha1.DeviceType]DeviceAllocator{}
 
 type DeviceHandler interface {
-	CalcDesiredRequestsAndCount(podRequests corev1.ResourceList, totalDevices deviceResources, hint *apiext.DeviceHint) (corev1.ResourceList, int, error)
+	CalcDesiredRequestsAndCount(node *corev1.Node, pod *corev1.Pod, podRequests corev1.ResourceList, nodeDevice *nodeDevice, hint *apiext.DeviceHint, state *preFilterState) (corev1.ResourceList, int, *framework.Status)
 }
 
 type DeviceAllocator interface {
@@ -49,15 +50,18 @@ type requestContext struct {
 	node                      *corev1.Node
 	requestsPerInstance       map[schedulingv1alpha1.DeviceType]corev1.ResourceList
 	desiredCountPerDeviceType map[schedulingv1alpha1.DeviceType]int
+	gpuRequirements           *GPURequirements
 	hints                     apiext.DeviceAllocateHints
 	hintSelectors             map[schedulingv1alpha1.DeviceType][2]labels.Selector
 	required                  map[schedulingv1alpha1.DeviceType]sets.Int
 	preferred                 map[schedulingv1alpha1.DeviceType]sets.Int
 	allocationScorer          *resourceAllocationScorer
+	nodeDevice                *nodeDevice
 }
 
 type AutopilotAllocator struct {
 	state                     *preFilterState
+	phaseBeingExecuted        string
 	nodeDevice                *nodeDevice
 	node                      *corev1.Node
 	pod                       *corev1.Pod
@@ -68,9 +72,12 @@ type AutopilotAllocator struct {
 }
 
 func (a *AutopilotAllocator) Prepare() *framework.Status {
+	if a.requestsPerInstance != nil {
+		return nil
+	}
 	state := a.state
 	nodeDevice := a.nodeDevice
-	requestsPerInstance, desiredCountPerDeviceType, status := a.calcRequestsAndCountByDeviceType(state.podRequests, nodeDevice, state.hints)
+	requestsPerInstance, desiredCountPerDeviceType, status := a.calcRequestsAndCountByDeviceType(state.podRequests, nodeDevice, state.hints, state.primaryDeviceType, state.podFitsSecondaryDeviceWellPlanned)
 	if !status.IsSuccess() {
 		return status
 	}
@@ -88,33 +95,33 @@ func (a *AutopilotAllocator) Prepare() *framework.Status {
 
 func (a *AutopilotAllocator) Allocate(
 	required, preferred map[schedulingv1alpha1.DeviceType]sets.Int,
-	requiredDeviceResources, preemptibleFreeDevices map[schedulingv1alpha1.DeviceType]deviceResources,
+	requiredDeviceResources, preemptibleDeviceResources map[schedulingv1alpha1.DeviceType]deviceResources,
 ) (apiext.DeviceAllocations, *framework.Status) {
-	state := a.state
-	nodeDevice := a.nodeDevice
-	if a.requestsPerInstance == nil {
-		if status := a.Prepare(); !status.IsSuccess() {
-			return nil, status
-		}
+	if status := a.Prepare(); !status.IsSuccess() {
+		return nil, status
 	}
 
-	nodeDevice = a.filterNodeDevice(nodeDevice, state.hints, state.hintSelectors, requiredDeviceResources, preemptibleFreeDevices)
-
+	nodeDevice := a.filterNodeDevice(requiredDeviceResources, preemptibleDeviceResources)
 	requestCtx := &requestContext{
 		pod:                       a.pod,
 		node:                      a.node,
-		hints:                     state.hints,
-		hintSelectors:             state.hintSelectors,
-		required:                  required,
-		preferred:                 preferred,
+		gpuRequirements:           a.state.gpuRequirements,
+		hints:                     a.state.hints,
+		hintSelectors:             a.state.hintSelectors,
 		requestsPerInstance:       a.requestsPerInstance,
 		desiredCountPerDeviceType: a.desiredCountPerDeviceType,
 		allocationScorer:          a.scorer,
+		required:                  required,
+		preferred:                 preferred,
+		nodeDevice:                a.nodeDevice,
 	}
-
-	deviceAllocations, status := a.tryJointAllocate(requestCtx, state.jointAllocate, nodeDevice)
-	if !status.IsSuccess() {
-		return nil, status
+	var deviceAllocations apiext.DeviceAllocations
+	var status *framework.Status
+	if len(a.requestsPerInstance) > 1 {
+		deviceAllocations, status = a.tryJointAllocate(requestCtx, a.state.jointAllocate, nodeDevice)
+		if !status.IsSuccess() {
+			return nil, status
+		}
 	}
 	deviceAllocations, status = a.allocateDevices(requestCtx, nodeDevice, deviceAllocations)
 	if !status.IsSuccess() {
@@ -131,19 +138,20 @@ func (a *AutopilotAllocator) Allocate(
 }
 
 func (a *AutopilotAllocator) filterNodeDevice(
-	nodeDevice *nodeDevice,
-	hints apiext.DeviceAllocateHints,
-	hintSelectors map[schedulingv1alpha1.DeviceType][2]labels.Selector,
-	requiredDeviceResources, preemptibleFreeDevices map[schedulingv1alpha1.DeviceType]deviceResources,
+	requiredDeviceResources, preemptibleDeviceResources map[schedulingv1alpha1.DeviceType]deviceResources,
 ) *nodeDevice {
+	if requiredDeviceResources == nil && preemptibleDeviceResources == nil && a.numaNodes == nil && !a.state.hasSelectors {
+		return a.nodeDevice
+	}
 	devices := map[schedulingv1alpha1.DeviceType][]int{}
 	for deviceType := range a.requestsPerInstance {
-		deviceInfos := nodeDevice.deviceInfos[deviceType]
+		deviceInfos := a.nodeDevice.deviceInfos[deviceType]
 		minors := sets.NewInt()
-		selector := hintSelectors[deviceType][0]
+		selector := a.state.hintSelectors[deviceType][0]
 		for _, deviceInfo := range deviceInfos {
+			// TODO if a.numaNodes == nil && selector == nil return all device of this deviceType
 			if a.numaNodes != nil {
-				if deviceInfo.Topology == nil || !a.numaNodes.IsSet(int(deviceInfo.Topology.NodeID)) {
+				if deviceInfo.Topology == nil || (deviceInfo.Topology.NodeID != -1 && !a.numaNodes.IsSet(int(deviceInfo.Topology.NodeID))) {
 					continue
 				}
 			}
@@ -155,13 +163,15 @@ func (a *AutopilotAllocator) filterNodeDevice(
 			devices[deviceType] = minors.UnsortedList()
 		}
 	}
-	nodeDevice = nodeDevice.filter(devices, hints, requiredDeviceResources, preemptibleFreeDevices)
+	// TODO Device allocation logic hotspots discovered through flame graphs
+	nodeDevice := a.nodeDevice.filter(devices, a.state.hints, requiredDeviceResources, preemptibleDeviceResources)
 	return nodeDevice
 }
 
 func (a *AutopilotAllocator) calcRequestsAndCountByDeviceType(
-	podRequests map[schedulingv1alpha1.DeviceType]corev1.ResourceList,
-	nodeDevice *nodeDevice, hints apiext.DeviceAllocateHints,
+	podRequests map[schedulingv1alpha1.DeviceType]corev1.ResourceList, nodeDevice *nodeDevice,
+	hints apiext.DeviceAllocateHints, primaryDeviceType schedulingv1alpha1.DeviceType,
+	podFitsSecondaryDeviceWellPlanned bool,
 ) (map[schedulingv1alpha1.DeviceType]corev1.ResourceList, map[schedulingv1alpha1.DeviceType]int, *framework.Status) {
 	requestPerInstance := map[schedulingv1alpha1.DeviceType]corev1.ResourceList{}
 	desiredCountPerDeviceType := map[schedulingv1alpha1.DeviceType]int{}
@@ -170,18 +180,21 @@ func (a *AutopilotAllocator) calcRequestsAndCountByDeviceType(
 			continue
 		}
 
-		totalDevices := nodeDevice.deviceTotal[deviceType]
-		if len(totalDevices) == 0 {
-			return nil, nil, framework.NewStatus(framework.UnschedulableAndUnresolvable, fmt.Sprintf("Insufficient %s devices", deviceType))
-		}
-
 		handler := deviceHandlers[deviceType]
 		if handler == nil {
 			continue
 		}
-		requests, desiredCount, err := handler.CalcDesiredRequestsAndCount(requests, totalDevices, hints[deviceType])
-		if err != nil {
-			return nil, nil, framework.NewStatus(framework.UnschedulableAndUnresolvable, err.Error())
+
+		if primaryDeviceType != "" && deviceType != primaryDeviceType && podFitsSecondaryDeviceWellPlanned && nodeDevice.secondaryDeviceWellPlanned && a.phaseBeingExecuted != schedulingphase.Reserve {
+			continue
+		}
+
+		requests, desiredCount, status := handler.CalcDesiredRequestsAndCount(a.node, a.pod, requests, nodeDevice, hints[deviceType], a.state)
+		if !status.IsSuccess() {
+			if status.Code() == framework.Skip {
+				continue
+			}
+			return nil, nil, status
 		}
 		requestPerInstance[deviceType] = requests
 		desiredCountPerDeviceType[deviceType] = desiredCount
@@ -193,62 +206,18 @@ func (a *AutopilotAllocator) tryJointAllocate(requestCtx *requestContext, jointA
 	if jointAllocate == nil || len(jointAllocate.DeviceTypes) == 0 {
 		return nil, nil
 	}
-
 	primaryDeviceType := jointAllocate.DeviceTypes[0]
-	topologyGuide := newDeviceTopologyGuide(nodeDevice, requestCtx.requestsPerInstance, jointAllocate)
-
-	deviceAllocations, status := a.allocateByTopology(requestCtx, nodeDevice, topologyGuide, primaryDeviceType, jointAllocate, jointAllocate.DeviceTypes[1:])
+	allocations, status := a.jointAllocate(nodeDevice, requestCtx, jointAllocate, primaryDeviceType, jointAllocate.DeviceTypes[1:])
+	if !status.IsSuccess() {
+		return nil, status
+	}
 	if jointAllocate.RequiredScope == apiext.SamePCIeDeviceJointAllocateScope {
-		if status.IsSuccess() {
-			status = a.validateJointAllocation(jointAllocate, nodeDevice, deviceAllocations)
-			if !status.IsSuccess() {
-				return nil, status
-			}
-		}
-	} else if !status.IsSuccess() {
-		status = nil
-	}
-	return deviceAllocations, status
-}
-
-func (a *AutopilotAllocator) allocateByTopology(requestCtx *requestContext, nodeDevice *nodeDevice, topologyGuide *deviceTopologyGuide, primaryDeviceType schedulingv1alpha1.DeviceType, jointAllocate *apiext.DeviceJointAllocate, secondaryDeviceTypes []schedulingv1alpha1.DeviceType) (apiext.DeviceAllocations, *framework.Status) {
-	desiredCount := requestCtx.desiredCountPerDeviceType[primaryDeviceType]
-	if desiredCount == 0 {
-		return nil, nil
-	}
-	freeNodeDevicesInPCIe := topologyGuide.freeNodeDevicesInPCIe()
-	for _, pcie := range freeNodeDevicesInPCIe {
-		if len(pcie.freeDevices[primaryDeviceType]) >= desiredCount {
-			allocations, status := a.jointAllocate(pcie.nodeDevice, requestCtx, jointAllocate, primaryDeviceType, secondaryDeviceTypes, sets.NewString(pcie.PCIeIndex.pcie))
-			if status.IsSuccess() {
-				return allocations, nil
-			}
+		status = a.validateJointAllocation(jointAllocate, nodeDevice, allocations)
+		if !status.IsSuccess() {
+			return nil, status
 		}
 	}
-
-	groupedNodeDevices := topologyGuide.freeNodeDevicesInNode(requestCtx, nodeDevice, jointAllocate)
-	for _, group := range groupedNodeDevices {
-		if len(group.freeDevices[primaryDeviceType]) >= desiredCount {
-			allocations, status := a.jointAllocate(group.nodeDevice, requestCtx, jointAllocate, primaryDeviceType, secondaryDeviceTypes, group.preferredPCIes)
-			if status.IsSuccess() && len(allocations) > 0 {
-				return allocations, nil
-			}
-		}
-	}
-
-	// TODO(joseph): Currently, scenarios with multiple sockets and multiple nodes are not supported
-
-	// In this case, we can only try to allocate jointly from the whole machine dimension and try to allocate them together as much as possible.
-	var preferredPCIes sets.String
-	for _, group := range groupedNodeDevices {
-		preferredPCIes = preferredPCIes.Union(group.preferredPCIes)
-	}
-	allocations, status := a.jointAllocate(nodeDevice, requestCtx, jointAllocate, primaryDeviceType, secondaryDeviceTypes, preferredPCIes)
-	if status.IsSuccess() && len(allocations) > 0 {
-		return allocations, nil
-	}
-
-	return nil, framework.NewStatus(framework.Unschedulable, "node(s) Joint-Allocate rules not met")
+	return allocations, nil
 }
 
 func (a *AutopilotAllocator) validateJointAllocation(jointAllocate *apiext.DeviceJointAllocate, nodeDevice *nodeDevice, deviceAllocations apiext.DeviceAllocations) *framework.Status {
@@ -282,26 +251,18 @@ func (a *AutopilotAllocator) validateJointAllocation(jointAllocate *apiext.Devic
 	return nil
 }
 
-func (a *AutopilotAllocator) jointAllocate(
-	nodeDevice *nodeDevice,
-	requestCtx *requestContext,
-	jointAllocate *apiext.DeviceJointAllocate,
-	primaryDeviceType schedulingv1alpha1.DeviceType,
-	secondaryDeviceTypes []schedulingv1alpha1.DeviceType,
-	preferredPCIes sets.String,
-) (apiext.DeviceAllocations, *framework.Status) {
+func (a *AutopilotAllocator) jointAllocate(nodeDevice *nodeDevice, requestCtx *requestContext, jointAllocate *apiext.DeviceJointAllocate, primaryDeviceType schedulingv1alpha1.DeviceType, secondaryDeviceTypes []schedulingv1alpha1.DeviceType) (apiext.DeviceAllocations, *framework.Status) {
 	primaryAllocations, status := allocateDevices(
 		requestCtx,
 		nodeDevice,
 		primaryDeviceType,
 		requestCtx.requestsPerInstance[primaryDeviceType],
-		requestCtx.desiredCountPerDeviceType[primaryDeviceType],
-		preferredPCIes)
+		requestCtx.desiredCountPerDeviceType[primaryDeviceType], nil)
 	if !status.IsSuccess() {
 		return nil, status
 	}
 	if len(primaryAllocations) == 0 {
-		return nil, nil
+		return nil, framework.NewStatus(framework.Unschedulable, "node(s) Insufficient primary device")
 	}
 
 	var secondaryDeviceAllocations apiext.DeviceAllocations
@@ -309,8 +270,8 @@ func (a *AutopilotAllocator) jointAllocate(
 		pcieIDs := newPreferredPCIes(nodeDevice, primaryDeviceType, primaryAllocations)
 		secondaryDeviceAllocations = apiext.DeviceAllocations{}
 		for _, deviceType := range secondaryDeviceTypes {
-			desiredCount := 1
-			if jointAllocate != nil && jointAllocate.RequiredScope == apiext.SamePCIeDeviceJointAllocateScope {
+			desiredCount := a.desiredCountPerDeviceType[deviceType]
+			if jointAllocate != nil && jointAllocate.RequiredScope == apiext.SamePCIeDeviceJointAllocateScope && desiredCount < pcieIDs.Len() {
 				desiredCount = pcieIDs.Len()
 			}
 			allocations, status := allocateDevices(
@@ -412,8 +373,12 @@ func defaultAllocateDevices(
 
 	var allocations []*apiext.DeviceAllocation
 	resourceMinorPairs := scoreDevices(podRequestPerInstance, nodeDeviceTotal, freeDevices, requestCtx.allocationScorer)
-	resourceMinorPairs = sortDeviceResourcesByMinor(resourceMinorPairs, requestCtx.preferred[deviceType])
-	resourceMinorPairs = sortDeviceResourcesByPreferredPCIe(resourceMinorPairs, preferredPCIEs, deviceInfos)
+	// TODO Device allocation logic hotspots discovered through flame graphs
+	if preferred := requestCtx.preferred[deviceType]; preferred.Len() > 0 {
+		resourceMinorPairs = sortDeviceResourcesByMinor(resourceMinorPairs, requestCtx.preferred[deviceType])
+	} else {
+		resourceMinorPairs = sortDeviceResourcesByPreferredPCIe(resourceMinorPairs, preferredPCIEs, deviceInfos)
+	}
 	for _, resourceMinorPair := range resourceMinorPairs {
 		if required.Len() > 0 && !required.Has(resourceMinorPair.minor) {
 			continue
@@ -432,6 +397,7 @@ func defaultAllocateDevices(
 			Resources: podRequestPerInstance,
 		}
 		if mustAllocateVF(hint) {
+			// TODO Device allocation logic hotspots discovered through flame graphs
 			vf := allocateVF(vfAllocation, deviceInfos, resourceMinorPair.minor, vfSelector)
 			if vf == nil {
 				continue
@@ -501,4 +467,29 @@ func newPreferredPCIes(nodeDevice *nodeDevice, deviceType schedulingv1alpha1.Dev
 		}
 	}
 	return pcies
+}
+
+func (a *AutopilotAllocator) score(
+	requiredDeviceResources, preemptibleDeviceResources map[schedulingv1alpha1.DeviceType]deviceResources,
+) (int64, *framework.Status) {
+	if status := a.Prepare(); !status.IsSuccess() {
+		return 0, status
+	}
+
+	nodeDevice := a.filterNodeDevice(requiredDeviceResources, preemptibleDeviceResources)
+
+	var finalScore int64
+	for deviceType, requests := range a.requestsPerInstance {
+		if quotav1.IsZero(requests) {
+			continue
+		}
+		deviceTotal := nodeDevice.deviceTotal[deviceType]
+		if len(deviceTotal) > 0 {
+			score := a.scorer.scoreNode(requests, deviceTotal, nodeDevice.deviceFree[deviceType])
+			// TODO(joseph): Maybe different device types have different weights, but that's not currently supported.
+			finalScore += score
+		}
+	}
+
+	return finalScore, nil
 }

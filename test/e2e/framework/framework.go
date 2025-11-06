@@ -25,8 +25,8 @@ package framework
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -48,7 +48,7 @@ import (
 	"k8s.io/client-go/restmapper"
 	scaleclient "k8s.io/client-go/scale"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
 	koordinatorclientset "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned"
@@ -332,7 +332,7 @@ func printSummaries(summaries []TestDataSummary, testBaseName string) {
 			} else {
 				// TODO: learn to extract test name and append it to the kind instead of timestamp.
 				filePath := path.Join(TestContext.ReportDir, summaries[i].SummaryKind()+"_"+testBaseName+"_"+now.Format(time.RFC3339)+".txt")
-				if err := ioutil.WriteFile(filePath, []byte(summaries[i].PrintHumanReadable()), 0644); err != nil {
+				if err := os.WriteFile(filePath, []byte(summaries[i].PrintHumanReadable()), 0644); err != nil {
 					Logf("Failed to write file %v with test performance data: %v", filePath, err)
 				}
 			}
@@ -349,7 +349,7 @@ func printSummaries(summaries []TestDataSummary, testBaseName string) {
 				// TODO: learn to extract test name and append it to the kind instead of timestamp.
 				filePath := path.Join(TestContext.ReportDir, summaries[i].SummaryKind()+"_"+testBaseName+"_"+now.Format(time.RFC3339)+".json")
 				Logf("Writing to %s", filePath)
-				if err := ioutil.WriteFile(filePath, []byte(summaries[i].PrintJSON()), 0644); err != nil {
+				if err := os.WriteFile(filePath, []byte(summaries[i].PrintJSON()), 0644); err != nil {
 					Logf("Failed to write file %v with test performance data: %v", filePath, err)
 				}
 			}
@@ -634,7 +634,7 @@ func (kc *KubeConfig) FindCluster(name string) *KubeCluster {
 
 // ConformanceIt is wrapper function for ginkgo It.  Adds "[Conformance]" tag and makes static analysis easier.
 func ConformanceIt(text string, body interface{}, timeout ...float64) bool {
-	return ginkgo.It(text+" [Conformance]", body, timeout...)
+	return ginkgo.It(text+" [Conformance]", body, timeout)
 }
 
 // KoordinatorDescribe is a wrapper function for ginkgo describe.  Adds namespacing.

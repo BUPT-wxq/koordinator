@@ -28,6 +28,10 @@ type FakeSchedulingV1alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeSchedulingV1alpha1) ClusterNetworkTopologies() v1alpha1.ClusterNetworkTopologyInterface {
+	return &FakeClusterNetworkTopologies{c}
+}
+
 func (c *FakeSchedulingV1alpha1) Devices() v1alpha1.DeviceInterface {
 	return &FakeDevices{c}
 }
@@ -38,6 +42,10 @@ func (c *FakeSchedulingV1alpha1) PodMigrationJobs() v1alpha1.PodMigrationJobInte
 
 func (c *FakeSchedulingV1alpha1) Reservations() v1alpha1.ReservationInterface {
 	return &FakeReservations{c}
+}
+
+func (c *FakeSchedulingV1alpha1) ScheduleExplanations(namespace string) v1alpha1.ScheduleExplanationInterface {
+	return &FakeScheduleExplanations{c, namespace}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

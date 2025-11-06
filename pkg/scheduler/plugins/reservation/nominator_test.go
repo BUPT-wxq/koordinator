@@ -18,6 +18,7 @@ package reservation
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,7 +27,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	quotav1 "k8s.io/apiserver/pkg/quota/v1"
+	apiresource "k8s.io/kubernetes/pkg/api/v1/resource"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/utils/pointer"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
@@ -272,13 +276,26 @@ func TestNominateReservation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			suit := newPluginTestSuit(t)
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+				},
+				Status: corev1.NodeStatus{},
+			}
+
+			suit := newPluginTestSuitWith(t, nil, []*corev1.Node{node})
 			plugin, err := suit.pluginFactory()
 			assert.NoError(t, err)
 			pl := plugin.(*Plugin)
 			cycleState := framework.NewCycleState()
+			requests := apiresource.PodRequests(tt.pod, apiresource.PodResourcesOptions{})
 			state := &stateData{
-				nodeReservationStates: map[string]nodeReservationState{},
+				schedulingStateData: schedulingStateData{
+					nodeReservationStates: map[string]*nodeReservationState{},
+					podRequests:           requests,
+					podRequestsResources:  framework.NewResource(requests),
+					podResourceNames:      quotav1.ResourceNames(requests),
+				},
 			}
 			for _, reservation := range tt.reservations {
 				rInfo := frameworkext.NewReservationInfo(reservation)
@@ -286,19 +303,469 @@ func TestNominateReservation(t *testing.T) {
 					rInfo.Allocated = allocated
 				}
 				nodeRState := state.nodeReservationStates[reservation.Status.NodeName]
+				if nodeRState == nil {
+					nodeRState = &nodeReservationState{}
+				}
 				nodeRState.nodeName = reservation.Status.NodeName
-				nodeRState.matched = append(nodeRState.matched, rInfo)
+				nodeRState.matchedOrIgnored = append(nodeRState.matchedOrIgnored, rInfo)
 				state.nodeReservationStates[reservation.Status.NodeName] = nodeRState
 				pl.reservationCache.updateReservation(reservation)
 			}
 			cycleState.Write(stateKey, state)
-			nominateRInfo, status := pl.NominateReservation(context.TODO(), cycleState, tt.pod, "test-node")
+			nominateRInfo, status := pl.NominateReservation(context.TODO(), cycleState, tt.pod, node.Name)
 			if tt.wantReservation == nil {
 				assert.Nil(t, nominateRInfo)
 			} else {
+				assert.NotNil(t, nominateRInfo)
 				assert.Equal(t, tt.wantReservation, nominateRInfo.Reservation)
 			}
 			assert.Equal(t, tt.wantStatus, status.IsSuccess())
 		})
 	}
+}
+
+func TestNominatePreAllocation(t *testing.T) {
+	testPreAllocationReservation := &schedulingv1alpha1.Reservation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-reservation",
+		},
+		Spec: schedulingv1alpha1.ReservationSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("4Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			AllocateOnce:   pointer.Bool(false),
+			AllocatePolicy: schedulingv1alpha1.ReservationAllocatePolicyRestricted,
+			PreAllocation:  true,
+		},
+	}
+	tests := []struct {
+		name           string
+		rInfo          *frameworkext.ReservationInfo
+		preAllocatable []*corev1.Pod
+		wantNominated  *corev1.Pod
+		wantStatus     bool
+	}{
+		{
+			name:       "node without pre-allocatable",
+			rInfo:      &frameworkext.ReservationInfo{},
+			wantStatus: true,
+		},
+		{
+			name:  "preferred pre-allocatable",
+			rInfo: frameworkext.NewReservationInfo(testPreAllocationReservation),
+			preAllocatable: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "preferred-pod",
+						Labels: map[string]string{},
+						UID:    "preferred-pod",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("2"),
+										corev1.ResourceMemory: resource.MustParse("4Gi"),
+									},
+								},
+							},
+						},
+						NodeName: "test-node",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "normal-pod",
+						UID:  "normal-pod",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("1"),
+										corev1.ResourceMemory: resource.MustParse("1Gi"),
+									},
+								},
+							},
+						},
+						NodeName: "test-node",
+					},
+				},
+			},
+			wantNominated: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "preferred-pod",
+					Labels: map[string]string{},
+					UID:    "preferred-pod",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("4Gi"),
+								},
+							},
+						},
+					},
+					NodeName: "test-node",
+				},
+			},
+			wantStatus: true,
+		},
+		{
+			name:  "preferred pre-allocatable 1",
+			rInfo: frameworkext.NewReservationInfo(testPreAllocationReservation),
+			preAllocatable: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "normal-pod",
+						UID:  "normal-pod",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("1"),
+										corev1.ResourceMemory: resource.MustParse("1Gi"),
+									},
+								},
+							},
+						},
+						NodeName: "test-node",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "preferred-pod",
+						Labels: map[string]string{},
+						UID:    "preferred-pod",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("2"),
+										corev1.ResourceMemory: resource.MustParse("4Gi"),
+									},
+								},
+							},
+						},
+						NodeName: "test-node",
+					},
+				},
+			},
+			wantNominated: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "preferred-pod",
+					Labels: map[string]string{},
+					UID:    "preferred-pod",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("4Gi"),
+								},
+							},
+						},
+					},
+					NodeName: "test-node",
+				},
+			},
+			wantStatus: true,
+		},
+		{
+			name:  "no pre-allocatable to nominate",
+			rInfo: frameworkext.NewReservationInfo(testPreAllocationReservation),
+			preAllocatable: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "test-pod",
+						Labels: map[string]string{},
+						UID:    "test-pod",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("6"),
+										corev1.ResourceMemory: resource.MustParse("6Gi"),
+									},
+								},
+							},
+						},
+						NodeName: "test-node",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "normal-pod",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceMemory: resource.MustParse("8Gi"),
+									},
+								},
+							},
+						},
+						NodeName: "test-node",
+					},
+				},
+			},
+			wantNominated: nil,
+			wantStatus:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+				},
+				Status: corev1.NodeStatus{
+					Allocatable: map[corev1.ResourceName]resource.Quantity{
+						corev1.ResourceCPU:    resource.MustParse("8"),
+						corev1.ResourceMemory: resource.MustParse("16Gi"),
+					},
+				},
+			}
+
+			suit := newPluginTestSuitWith(t, nil, []*corev1.Node{node})
+			plugin, err := suit.pluginFactory()
+			assert.NoError(t, err)
+			pl := plugin.(*Plugin)
+			cycleState := framework.NewCycleState()
+			var requests corev1.ResourceList
+			if reservePod := tt.rInfo.GetReservePod(); reservePod != nil {
+				requests = apiresource.PodRequests(tt.rInfo.GetReservePod(), apiresource.PodResourcesOptions{})
+			}
+			state := &stateData{
+				schedulingStateData: schedulingStateData{
+					nodeReservationStates: map[string]*nodeReservationState{},
+					podRequests:           requests,
+					podRequestsResources:  framework.NewResource(requests),
+					podResourceNames:      quotav1.ResourceNames(requests),
+				},
+			}
+			for _, pod := range tt.preAllocatable {
+				nodeRState := state.nodeReservationStates[pod.Spec.NodeName]
+				if nodeRState == nil {
+					nodeRState = &nodeReservationState{}
+				}
+				nodeRState.nodeName = pod.Spec.NodeName
+				nodeRState.preAllocatablePods = append(nodeRState.preAllocatablePods, pod)
+				state.nodeReservationStates[pod.Spec.NodeName] = nodeRState
+			}
+			cycleState.Write(stateKey, state)
+			nominatedPod, status := pl.NominatePreAllocation(context.TODO(), cycleState, tt.rInfo, node.Name)
+			if tt.wantNominated == nil {
+				assert.Nil(t, nominatedPod)
+			} else {
+				assert.NotNil(t, nominatedPod)
+				assert.Equal(t, tt.wantNominated, nominatedPod)
+			}
+			assert.Equal(t, tt.wantStatus, status.IsSuccess())
+		})
+	}
+}
+
+func newTestReservation(t *testing.T, name string, labels, ownerLabels map[string]string, nodeName string, allocatable corev1.ResourceList) *schedulingv1alpha1.Reservation {
+	reservation := &schedulingv1alpha1.Reservation{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:    uuid.NewUUID(),
+			Name:   name,
+			Labels: labels,
+		},
+		Spec: schedulingv1alpha1.ReservationSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: allocatable.DeepCopy(),
+							},
+						},
+					},
+				},
+			},
+			Owners: []schedulingv1alpha1.ReservationOwner{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: ownerLabels,
+					},
+				},
+			},
+			AllocateOnce:   pointer.Bool(false),
+			AllocatePolicy: schedulingv1alpha1.ReservationAllocatePolicyRestricted,
+		},
+	}
+	assert.NoError(t, reservationutil.SetReservationAvailable(reservation, nodeName))
+	return reservation
+}
+
+func TestMultiReservationsOnSameNode(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-1",
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceCPU:    resource.MustParse("96"),
+				corev1.ResourceMemory: resource.MustParse("1886495404Ki"),
+			},
+		},
+	}
+
+	resourceList := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("16"),
+		corev1.ResourceMemory: resource.MustParse("32Gi"),
+	}
+	labels := map[string]string{
+		"foo": "bar",
+	}
+	suit := newPluginTestSuitWith(t, nil, []*corev1.Node{node})
+	var reservations []*schedulingv1alpha1.Reservation
+	for i := 0; i < 3; i++ {
+		r := newTestReservation(t, fmt.Sprintf("test-r-%d", i), labels, labels, node.Name, resourceList)
+		reservations = append(reservations, r)
+		_, err := suit.extenderFactory.KoordinatorClientSet().SchedulingV1alpha1().Reservations().Create(context.TODO(), r, metav1.CreateOptions{})
+		assert.NoError(t, err)
+	}
+	nodeInfo, err := suit.fw.SnapshotSharedLister().NodeInfos().Get(node.Name)
+	assert.NoError(t, err)
+	recoverNodeInfoFn := func() {
+		for _, v := range reservations {
+			nodeInfo.AddPod(reservationutil.NewReservePod(v))
+		}
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod-1",
+			Namespace: "default",
+			Labels:    labels,
+			UID:       uuid.NewUUID(),
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: resourceList,
+					},
+				},
+			},
+		},
+	}
+	affinity := &apiext.ReservationAffinity{
+		ReservationSelector: labels,
+	}
+	assert.NoError(t, apiext.SetReservationAffinity(pod, affinity))
+	_, err = suit.fw.ClientSet().CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	p, err := suit.pluginFactory()
+	assert.NoError(t, err)
+	pl := p.(*Plugin)
+
+	nominatedReservationCount := map[types.UID]int{}
+	for range reservations {
+		recoverNodeInfoFn()
+		cycleState := framework.NewCycleState()
+		pl.BeforePreFilter(context.TODO(), cycleState, pod)
+		pl.PreFilter(context.TODO(), cycleState, pod)
+		pl.Filter(context.TODO(), cycleState, pod, nodeInfo)
+		nm := pl.handle.(frameworkext.FrameworkExtender).GetReservationNominator()
+		rInfo, status := nm.NominateReservation(context.TODO(), cycleState, pod, node.Name)
+		assert.True(t, status.IsSuccess())
+		nm.AddNominatedReservation(pod, node.Name, rInfo)
+		rInfo = pl.handle.GetReservationNominator().GetNominatedReservation(pod, node.Name)
+		assert.NotNil(t, rInfo, rInfo)
+		pl.Reserve(context.TODO(), cycleState, pod, node.Name)
+		nominatedReservationCount[rInfo.UID()]++
+		nm.DeleteNominatedReservePodOrReservation(pod)
+	}
+
+	assert.Len(t, nominatedReservationCount, len(reservations))
+	for _, v := range nominatedReservationCount {
+		assert.Equal(t, 1, v)
+	}
+}
+
+func TestReservationsNominator(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-1",
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceCPU:    resource.MustParse("96"),
+				corev1.ResourceMemory: resource.MustParse("1886495404Ki"),
+			},
+		},
+	}
+
+	resourceList := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("16"),
+		corev1.ResourceMemory: resource.MustParse("32Gi"),
+	}
+	labels := map[string]string{
+		"foo": "bar",
+	}
+	suit := newPluginTestSuitWith(t, nil, []*corev1.Node{node})
+	var pods []*corev1.Pod
+	for i := 0; i < 3; i++ {
+		r := newTestReservation(t, fmt.Sprintf("test-r-%d", i), labels, labels, node.Name, resourceList)
+		r.Status.Phase = "" // set to inactive
+		pods = append(pods, reservationutil.NewReservePod(r))
+		_, err := suit.extenderFactory.KoordinatorClientSet().SchedulingV1alpha1().Reservations().Create(context.TODO(), r, metav1.CreateOptions{})
+		assert.NoError(t, err)
+	}
+	nodeInfo, err := suit.fw.SnapshotSharedLister().NodeInfos().Get(node.Name)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(nodeInfo.Pods))
+
+	p, err := suit.pluginFactory()
+	assert.NoError(t, err)
+	pl := p.(*Plugin)
+
+	nominatorImpl := pl.handle.(frameworkext.FrameworkExtender).GetReservationNominator()
+
+	nominatorImpl.AddNominatedReservePod(pods[0], "node-1")
+	ctx := context.TODO()
+	state := framework.NewCycleState()
+	pod, nodeInfoOut, update, status := pl.BeforeFilter(ctx, state, pods[2], nodeInfo)
+	assert.Equal(t, pod, pods[2])
+	assert.True(t, update)
+	assert.True(t, status.IsSuccess())
+	assert.Equal(t, 1, len(nodeInfoOut.Pods))
+
+	nominatorImpl.AddNominatedReservePod(pods[1], "node-1")
+	pod, nodeInfoOut, update, status = pl.BeforeFilter(ctx, state, pods[2], nodeInfo)
+	assert.Equal(t, pod, pods[2])
+	assert.True(t, update)
+	assert.True(t, status.IsSuccess())
+	assert.Equal(t, 2, len(nodeInfoOut.Pods))
 }

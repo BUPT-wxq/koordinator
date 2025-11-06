@@ -17,6 +17,8 @@ limitations under the License.
 package statesinformer
 
 import (
+	"fmt"
+
 	topov1alpha1 "github.com/k8stopologyawareschedwg/noderesourcetopology-api/pkg/apis/topology/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 
@@ -25,14 +27,37 @@ import (
 )
 
 type PodMeta struct {
-	Pod       *corev1.Pod
-	CgroupDir string
+	Pod              *corev1.Pod
+	CgroupDir        string
+	ContainerTaskIds map[string][]int32
+}
+
+// DeepCopyContainerTaskIds creates a deep copy of ContainerTaskIds
+func DeepCopyContainerTaskIds(in map[string][]int32) map[string][]int32 {
+	if in == nil {
+		return nil
+	}
+
+	out := make(map[string][]int32, len(in))
+
+	for key, value := range in {
+		if value == nil {
+			out[key] = nil
+		} else {
+			copyValue := make([]int32, len(value))
+			copy(copyValue, value)
+			out[key] = copyValue
+		}
+	}
+
+	return out
 }
 
 func (in *PodMeta) DeepCopy() *PodMeta {
 	out := new(PodMeta)
 	out.Pod = in.Pod.DeepCopy()
 	out.CgroupDir = in.CgroupDir
+	out.ContainerTaskIds = DeepCopyContainerTaskIds(in.ContainerTaskIds)
 	return out
 }
 
@@ -69,7 +94,7 @@ func (r RegisterType) String() string {
 	case RegisterTypeNodeTopology:
 		return "RegisterTypeNodeTopology"
 	case RegisterTypeNodeMetadata:
-		return "RegisterNodeMetadata"
+		return "RegisterTypeNodeMetadata"
 	default:
 		return "RegisterTypeUnknown"
 	}
@@ -80,6 +105,13 @@ type CallbackTarget struct {
 	HostApplications []slov1alpha1.HostApplicationSpec
 }
 
+func (t *CallbackTarget) String() string {
+	if t == nil {
+		return "target: nil"
+	}
+	return fmt.Sprintf("target: pods num %v, host apps num %v", len(t.Pods), len(t.HostApplications))
+}
+
 type UpdateCbFn func(t RegisterType, obj interface{}, target *CallbackTarget)
 
 type StatesInformer interface {
@@ -88,6 +120,7 @@ type StatesInformer interface {
 
 	GetNode() *corev1.Node
 	GetNodeSLO() *slov1alpha1.NodeSLO
+	GetNodeMetricSpec() *slov1alpha1.NodeMetricSpec
 
 	GetAllPods() []*PodMeta
 

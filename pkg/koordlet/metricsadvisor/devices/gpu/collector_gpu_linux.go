@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 
 	"github.com/koordinator-sh/koordinator/pkg/features"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metriccache"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/devices/helper"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/util"
 )
 
@@ -51,6 +53,9 @@ type device struct {
 	Minor       int32 // index starting from 0
 	DeviceUUID  string
 	MemoryTotal uint64
+	NodeID      int32
+	PCIE        string
+	BusID       string
 	Device      nvml.Device
 }
 
@@ -114,10 +119,28 @@ func (g *gpuDeviceManager) initGPUData() error {
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("unable to get device memory info: %v", nvml.ErrorString(ret))
 		}
+		pciInfo, ret := gpudevice.GetPciInfo()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("unable to get pci info: %v", nvml.ErrorString(ret))
+		}
+		busIDBuilder := &strings.Builder{}
+		for _, v := range pciInfo.BusIdLegacy {
+			if v != 0 {
+				busIDBuilder.WriteByte(byte(v))
+			}
+		}
+		busID := strings.ToLower(busIDBuilder.String())
+		nodeID, pcie, busID, err := helper.ParsePCIInfo(busID)
+		if err != nil {
+			return err
+		}
 		devices[deviceIndex] = &device{
 			DeviceUUID:  uuid,
 			Minor:       int32(minor),
 			MemoryTotal: memory.Total,
+			NodeID:      nodeID,
+			PCIE:        pcie,
+			BusID:       busID,
 			Device:      gpudevice,
 		}
 	}
@@ -134,7 +157,14 @@ func (g *gpuDeviceManager) deviceInfos() metriccache.Devices {
 	defer g.RUnlock()
 	gpuDevices := util.GPUDevices{}
 	for _, device := range g.devices {
-		gpuDevices = append(gpuDevices, util.GPUDeviceInfo{UUID: device.DeviceUUID, Minor: device.Minor, MemoryTotal: device.MemoryTotal})
+		gpuDevices = append(gpuDevices, util.GPUDeviceInfo{
+			UUID:        device.DeviceUUID,
+			Minor:       device.Minor,
+			MemoryTotal: device.MemoryTotal,
+			NodeID:      device.NodeID,
+			PCIE:        device.PCIE,
+			BusID:       device.BusID,
+		})
 	}
 
 	return gpuDevices
@@ -179,7 +209,7 @@ func (g *gpuDeviceManager) getNodeGPUUsage() []metriccache.MetricSample {
 	return gpuMetrics
 }
 
-func (g *gpuDeviceManager) getPodOrContinerTotalGPUUsageOfPIDs(id string, isPodID bool, pids []uint32) []metriccache.MetricSample {
+func (g *gpuDeviceManager) getPodOrContainerTotalGPUUsageOfPIDs(id string, isPodID bool, pids []uint32) []metriccache.MetricSample {
 	if id == "" {
 		klog.Warning("id is empty")
 		return nil
@@ -261,7 +291,7 @@ func (g *gpuDeviceManager) getPodGPUUsage(uid, podParentDir string, cs []corev1.
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pid, error: %v", err)
 	}
-	return g.getPodOrContinerTotalGPUUsageOfPIDs(uid, true, pids), nil
+	return g.getPodOrContainerTotalGPUUsageOfPIDs(uid, true, pids), nil
 }
 
 func (g *gpuDeviceManager) getContainerGPUUsage(containerID, podParentDir string, c *corev1.ContainerStatus) ([]metriccache.MetricSample, error) {
@@ -273,7 +303,7 @@ func (g *gpuDeviceManager) getContainerGPUUsage(containerID, podParentDir string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pid, error: %v", err)
 	}
-	return g.getPodOrContinerTotalGPUUsageOfPIDs(containerID, false, currentPIDs), nil
+	return g.getPodOrContainerTotalGPUUsageOfPIDs(containerID, false, currentPIDs), nil
 }
 
 func (g *gpuDeviceManager) collectGPUUsage() {

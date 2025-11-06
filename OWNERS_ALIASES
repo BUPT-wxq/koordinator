@@ -3,50 +3,44 @@
 aliases:
 
   ci-approvers:
-    - eahydra
-    - jasonliu747
+    - saintube
 
   api-machinery-approvers:
-    - FillZpp
+    - zwzhang0107
+    - ZiMengSheng
 
   scheduler-approvers:
-    - eahydra
     - buptcozy
+    - ZiMengSheng
 
   slo-controller-approvers:
-    - jasonliu747
     - zwzhang0107
 
   koordlet-approvers:
-    - jasonliu747
     - saintube
     - zwzhang0107
 
   descheduler-approvers:
-    - eahydra
-    - FillZpp
+    - songtao98
 
   runtime-proxy-approvers:
     - honpey
     - ZYecho
 
   webhook-approvers:
-    - FillZpp
-    - eahydra
+    - zwzhang0107
 
-  yarn-approvers:
+  prediction-approvers:
     - zwzhang0107
     - saintube
 
-  yarn-controller-approvers:
-    - zwzhang0107
-    - saintube
-    - FillZpp
-    - songzh215
+  device-approvers:
+    - ZiMengSheng
+    - zqzten
 
-  yarn-copilot-approvers:
-    - zwzhang0107
+
+  job-approvers:
+    - ZiMengSheng
+    - zqzten
     - saintube
-    - FillZpp
-    - songzh215
 

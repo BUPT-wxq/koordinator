@@ -24,18 +24,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/controller"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	"k8s.io/utils/pointer"
-	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
-	pgfake "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned/fake"
-	schedinformer "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions"
 
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
+	pgfake "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/clientset/versioned/fake"
+	schedinformer "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions"
 	koordfake "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned/fake"
 	koordinformers "github.com/koordinator-sh/koordinator/pkg/client/informers/externalversions"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
@@ -159,6 +161,15 @@ func Test_Run(t *testing.T) {
 			previousPhase:     v1alpha1.PodGroupRunning,
 			desiredGroupPhase: v1alpha1.PodGroupPending,
 		},
+		{
+			name:              "Group status convert from scheduling to scheduled, bugCase",
+			pgName:            "pg11",
+			minMember:         4,
+			podNames:          []string{"pod11-1", "pod11-2", "pod11-3", "pod11-4"},
+			podPhase:          v1.PodRunning,
+			previousPhase:     v1alpha1.PodGroupScheduling,
+			desiredGroupPhase: v1alpha1.PodGroupRunning,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -170,14 +181,17 @@ func Test_Run(t *testing.T) {
 					kubeClient.CoreV1().Pods(p.Namespace).UpdateStatus(ctx, p, metav1.UpdateOptions{})
 				}
 			}
-			go ctrl.Start()
-			err := wait.Poll(200*time.Millisecond, 1*time.Second, func() (done bool, err error) {
+			ctrl.Start()
+			err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 1*time.Second, false, func(ctx context.Context) (done bool, err error) {
 				pg, err := pgClient.SchedulingV1alpha1().PodGroups("default").Get(ctx, c.pgName, metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
 				if pg.Status.Phase != c.desiredGroupPhase {
 					return false, fmt.Errorf("want %v, got %v", c.desiredGroupPhase, pg.Status.Phase)
+				}
+				if c.name == "Group status convert from scheduling to scheduled, bugCase" {
+					assert.Equal(t, int32(4), pg.Status.Scheduled)
 				}
 				return true, nil
 			})
@@ -243,8 +257,8 @@ func TestFillGroupStatusOccupied(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ctrl, _, pgClient := setUp(ctx, c.podNames, c.pgName, c.podPhase, c.minMember, c.groupPhase, nil, c.podOwnerReference)
-			go ctrl.Start()
-			err := wait.Poll(200*time.Millisecond, 1*time.Second, func() (done bool, err error) {
+			ctrl.Start()
+			err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 1*time.Second, false, func(ctx context.Context) (done bool, err error) {
 				pg, err := pgClient.SchedulingV1alpha1().PodGroups("default").Get(ctx, c.pgName, metav1.GetOptions{})
 				if err != nil {
 					return false, err
@@ -268,10 +282,16 @@ func setUp(ctx context.Context, podNames []string, pgName string, podPhase v1.Po
 	if len(podNames) == 0 {
 		kubeClient = fake.NewSimpleClientset()
 	} else {
-		ps := makePods(podNames, pgName, podPhase, podOwnerReference)
-		kubeClient = fake.NewSimpleClientset(ps[0], ps[1])
+		var objs []runtime.Object
+		for _, pod := range makePods(podNames, pgName, podPhase, podOwnerReference) {
+			objs = append(objs, pod)
+		}
+		kubeClient = fake.NewSimpleClientset(objs...)
 	}
 	pg := makePG(pgName, minMember, groupPhase, podGroupCreateTime)
+	if pg.Name == "pg11" {
+		pg.Status.Scheduled = 3
+	}
 	pgClient := pgfake.NewSimpleClientset(pg)
 
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
@@ -282,8 +302,8 @@ func setUp(ctx context.Context, podNames []string, pgName string, podPhase v1.Po
 	koordClient := koordfake.NewSimpleClientset()
 	koordInformerFactory := koordinformers.NewSharedInformerFactory(koordClient, 0)
 
-	args := &config.CoschedulingArgs{DefaultTimeout: &metav1.Duration{Duration: time.Second}}
-	pgMgr := core.NewPodGroupManager(args, pgClient, pgInformerFactory, informerFactory, koordInformerFactory)
+	args := &config.CoschedulingArgs{DefaultTimeout: metav1.Duration{Duration: time.Second}}
+	pgMgr := core.NewPodGroupManager(nil, args, pgClient, pgInformerFactory, informerFactory, koordInformerFactory)
 	ctrl := NewPodGroupController(pgInformer, podInformer, pgClient, pgMgr, 1)
 	return ctrl, kubeClient, pgClient
 }
@@ -297,6 +317,7 @@ func makePods(podNames []string, pgName string, phase v1.PodPhase, reference []m
 		if reference != nil && len(reference) != 0 {
 			pod.OwnerReferences = reference
 		}
+		pod.Spec.NodeName = "test"
 		pds = append(pds, pod)
 	}
 	return pds
@@ -324,4 +345,71 @@ func makePG(pgName string, minMember int32, previousPhase v1alpha1.PodGroupPhase
 		pg.CreationTimestamp = *createTime
 	}
 	return pg
+}
+
+func TestFillOccupiedObj(t *testing.T) {
+	tests := []struct {
+		name           string
+		pod            *v1.Pod
+		expectedResult string
+	}{
+		{
+			name: "Pod has no OwnerReferences",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+				},
+				// No OwnerReferences
+			},
+			expectedResult: "",
+		},
+		{
+			name: "Pod has one OwnerReference",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Name: "owner-1",
+						},
+					},
+				},
+			},
+			expectedResult: "default/owner-1",
+		},
+		{
+			name: "Pod has multiple OwnerReferences (sorted)",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "kube-system",
+					OwnerReferences: []metav1.OwnerReference{
+						{Name: "owner-b"},
+						{Name: "owner-a"},
+						{Name: "owner-c"},
+					},
+				},
+			},
+			expectedResult: "kube-system/owner-a,kube-system/owner-b,kube-system/owner-c",
+		},
+		{
+			name: "Pod has empty OwnerReferences slice",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:       "test",
+					OwnerReferences: []metav1.OwnerReference{},
+				},
+			},
+			expectedResult: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pg := &v1alpha1.PodGroup{}
+			fillOccupiedObj(pg, tt.pod)
+			if pg.Status.OccupiedBy != tt.expectedResult {
+				t.Errorf("expected %q, got %q", tt.expectedResult, pg.Status.OccupiedBy)
+			}
+		})
+	}
 }

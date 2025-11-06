@@ -18,7 +18,6 @@ package elasticquota
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -30,9 +29,9 @@ import (
 	k8sfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
-	schedulerv1alpha1 "sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
+	schedulerv1alpha1 "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/features"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/elasticquota/core"
 )
@@ -155,9 +154,13 @@ func (g *Plugin) migratePods(out, in string) {
 
 // createDefaultQuotaIfNotPresent create DefaultQuotaGroup's CRD
 func (g *Plugin) createDefaultQuotaIfNotPresent() {
-	eq, _ := g.quotaLister.ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).Get(extension.DefaultQuotaName)
-	if eq != nil {
+	eq, err := g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).Get(context.TODO(), extension.DefaultQuotaName, metav1.GetOptions{ResourceVersion: "0"})
+	if err == nil && eq != nil {
 		klog.Infof("DefaultQuota already exists, skip create it.")
+		return
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("failed to get DefaultQuota, err: %v", err)
 		return
 	}
 
@@ -171,9 +174,7 @@ func (g *Plugin) createDefaultQuotaIfNotPresent() {
 			Max: g.pluginArgs.DefaultQuotaGroupMax.DeepCopy(),
 		},
 	}
-	sharedWeight, _ := json.Marshal(defaultElasticQuota.Spec.Max)
-	defaultElasticQuota.Annotations[extension.AnnotationRuntime] = string(sharedWeight)
-	_, err := g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).
+	_, err = g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).
 		Create(context.TODO(), defaultElasticQuota, metav1.CreateOptions{})
 	if err != nil {
 		klog.Errorf("create default group fail, err:%v", err.Error())
@@ -185,9 +186,13 @@ func (g *Plugin) createDefaultQuotaIfNotPresent() {
 // defaultQuotaInfo and systemQuotaInfo are created once the groupQuotaManager is created, but we also want to see
 // the used/request of the two quotaGroups, so we create the two quota's CRD if not present.
 func (g *Plugin) createSystemQuotaIfNotPresent() {
-	eq, _ := g.quotaLister.ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).Get(extension.SystemQuotaName)
-	if eq != nil {
+	eq, err := g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).Get(context.TODO(), extension.SystemQuotaName, metav1.GetOptions{ResourceVersion: "0"})
+	if err == nil && eq != nil {
 		klog.Infof("SystemQuota already exists, skip create it.")
+		return
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("failed to get SystemQuota, err: %v", err)
 		return
 	}
 
@@ -201,9 +206,7 @@ func (g *Plugin) createSystemQuotaIfNotPresent() {
 			Max: g.pluginArgs.SystemQuotaGroupMax.DeepCopy(),
 		},
 	}
-	sharedWeight, _ := json.Marshal(systemElasticQuota.Spec.Max)
-	systemElasticQuota.Annotations[extension.AnnotationRuntime] = string(sharedWeight)
-	_, err := g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).
+	_, err = g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).
 		Create(context.TODO(), systemElasticQuota, metav1.CreateOptions{})
 	if err != nil {
 		klog.Errorf("create system group fail, err:%v", err.Error())
@@ -214,11 +217,16 @@ func (g *Plugin) createSystemQuotaIfNotPresent() {
 
 // createRootQuotaIfNotPresent create RootQuotaGroup's CRD
 func (g *Plugin) createRootQuotaIfNotPresent() {
-	eq, _ := g.quotaLister.ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).Get(extension.RootQuotaName)
-	if eq != nil {
+	eq, err := g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).Get(context.TODO(), extension.RootQuotaName, metav1.GetOptions{ResourceVersion: "0"})
+	if err == nil && eq != nil {
 		klog.Infof("RootQuota already exists, skip create it.")
 		return
 	}
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("failed to get RootQuota, err: %v", err)
+		return
+	}
+
 	rootElasticQuota := &schedulerv1alpha1.ElasticQuota{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        extension.RootQuotaName,
@@ -230,7 +238,7 @@ func (g *Plugin) createRootQuotaIfNotPresent() {
 	rootElasticQuota.Labels[extension.LabelQuotaIsParent] = "true"
 	rootElasticQuota.Labels[extension.LabelAllowLentResource] = "false"
 	rootElasticQuota.Labels[extension.LabelQuotaParent] = ""
-	_, err := g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).
+	_, err = g.client.SchedulingV1alpha1().ElasticQuotas(g.pluginArgs.QuotaGroupNamespace).
 		Create(context.TODO(), rootElasticQuota, metav1.CreateOptions{})
 	if err != nil {
 		klog.Errorf("create root group fail, err:%v", err.Error())
@@ -244,7 +252,7 @@ func (g *Plugin) snapshotPostFilterState(quotaInfo *core.QuotaInfo, state *frame
 		quotaInfo:          quotaInfo,
 		used:               quotaInfo.GetUsed(),
 		nonPreemptibleUsed: quotaInfo.GetNonPreemptibleUsed(),
-		runtime:            quotaInfo.GetRuntime(),
+		usedLimit:          g.getQuotaInfoUsedLimit(quotaInfo),
 	}
 	state.Write(postFilterKey, postFilterState)
 	return postFilterState
@@ -270,24 +278,32 @@ func getPostFilterState(cycleState *framework.CycleState) (*PostFilterState, err
 	return s, nil
 }
 
-func (g *Plugin) checkQuotaRecursive(curQuotaName string, quotaNameTopo []string, podRequest v1.ResourceList) *framework.Status {
-	quotaInfo := g.groupQuotaManager.GetQuotaInfoByName(curQuotaName)
+func (g *Plugin) checkQuotaRecursive(mgr *core.GroupQuotaManager, curQuotaName string, quotaNameTopo []string, podRequest v1.ResourceList) *framework.Status {
+	if curQuotaName == extension.RootQuotaName {
+		return framework.NewStatus(framework.Success, "")
+	}
+
+	quotaInfo := mgr.GetQuotaInfoByName(curQuotaName)
+	if quotaInfo == nil {
+		return framework.NewStatus(framework.Error, fmt.Sprintf("Could not find the elasticQuota %v, quotaNameTopo: %v", curQuotaName, quotaNameTopo))
+	}
 	quotaUsed := quotaInfo.GetUsed()
-	quotaRuntime := quotaInfo.GetRuntime()
+	quotaUsedLimit := g.getQuotaInfoUsedLimit(quotaInfo)
+
 	newUsed := quotav1.Mask(quotav1.Add(podRequest, quotaUsed), quotav1.ResourceNames(podRequest))
-	if isLessEqual, exceedDimensions := quotav1.LessThanOrEqual(newUsed, quotaRuntime); !isLessEqual {
+	if isLessEqual, exceedDimensions := quotav1.LessThanOrEqual(newUsed, quotaUsedLimit); !isLessEqual {
 		return framework.NewStatus(framework.Unschedulable, fmt.Sprintf("Insufficient quotas, "+
 			"quotaNameTopo: %v, runtime: %v, used: %v, pod's request: %v, exceedDimensions: %v", quotaNameTopo,
-			printResourceList(quotaRuntime), printResourceList(quotaUsed), printResourceList(podRequest), exceedDimensions))
+			printResourceList(quotaUsedLimit), printResourceList(quotaUsed), printResourceList(podRequest), exceedDimensions))
 	}
-	if quotaInfo.ParentName != extension.RootQuotaName {
-		quotaNameTopo = append([]string{quotaInfo.ParentName}, quotaNameTopo...)
-		return g.checkQuotaRecursive(quotaInfo.ParentName, quotaNameTopo, podRequest)
-	}
-	return framework.NewStatus(framework.Success, "")
+	quotaNameTopo = append([]string{quotaInfo.ParentName}, quotaNameTopo...)
+	return g.checkQuotaRecursive(mgr, quotaInfo.ParentName, quotaNameTopo, podRequest)
 }
 
 func printResourceList(rl v1.ResourceList) string {
+	if len(rl) == 0 {
+		return "<empty>"
+	}
 	res := make([]string, 0)
 	for k, v := range rl {
 		tmp := string(k) + ":" + v.String()
@@ -297,4 +313,11 @@ func printResourceList(rl v1.ResourceList) string {
 		return res[i] < res[j]
 	})
 	return strings.Join(res, ",")
+}
+
+func (g *Plugin) getQuotaInfoUsedLimit(quotaInfo *core.QuotaInfo) v1.ResourceList {
+	if g.pluginArgs.EnableRuntimeQuota {
+		return quotaInfo.GetRuntime()
+	}
+	return quotaInfo.GetMax()
 }

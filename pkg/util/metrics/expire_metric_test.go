@@ -34,7 +34,7 @@ type testMetric struct {
 
 const testSubsystem = "test"
 
-func Test_GCGaugeVec_WithSet(t *testing.T) {
+func Test_GCGaugeVec(t *testing.T) {
 	metricName := "test_gauge"
 	vec := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: testSubsystem,
@@ -54,20 +54,29 @@ func Test_GCGaugeVec_WithSet(t *testing.T) {
 	testGaugeVec.WithSet(pod1Labels, 1)
 	ms := collectMetrics(vec)
 	assert.Equal(t, 1, len(ms), "checkMetricsNum")
+	assert.Equal(t, 1, testGaugeVec.expireStatus.CountStatus(metricName), "checkStatusNum")
 
 	//add metric2
 	pod2Labels := prometheus.Labels{"node": "node2", "pod_name": "pod2", "pod_namespace": "ns2"}
 	testGaugeVec.WithSet(pod2Labels, 2)
 	ms = collectMetrics(vec)
 	assert.Equal(t, 2, len(ms), "checkMetricsNum")
+	assert.Equal(t, 2, testGaugeVec.expireStatus.CountStatus(metricName), "checkStatusNum")
 
 	//update metric1
 	testGaugeVec.WithSet(pod1Labels, 3)
 	ms = collectMetrics(vec)
 	assert.Equal(t, 2, len(ms), "checkMetricsNum")
+	assert.Equal(t, 2, testGaugeVec.expireStatus.CountStatus(metricName), "checkStatusNum")
+
+	// delete metric1
+	testGaugeVec.Delete(pod1Labels)
+	ms = collectMetrics(vec)
+	assert.Equal(t, 1, len(ms), "checkMetricsNum")
+	assert.Equal(t, 1, testGaugeVec.expireStatus.CountStatus(metricName), "checkStatusNum")
 }
 
-func Test_GCCounterVec_WithInc(t *testing.T) {
+func Test_GCCounterVec(t *testing.T) {
 	metricName := "test_counter"
 	vec := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: testSubsystem,
@@ -87,17 +96,70 @@ func Test_GCCounterVec_WithInc(t *testing.T) {
 	testCounterVec.WithInc(pod1Labels)
 	ms := collectMetrics(vec)
 	assert.Equal(t, 1, len(ms), "checkMetricsNum")
+	assert.Equal(t, 1, testCounterVec.expireStatus.CountStatus(metricName), "checkStatusNum")
 
 	//add metric2
 	pod2Labels := prometheus.Labels{"node": "node2", "pod_name": "pod2", "pod_namespace": "ns2"}
 	testCounterVec.WithInc(pod2Labels)
 	ms = collectMetrics(vec)
 	assert.Equal(t, 2, len(ms), "checkMetricsNum")
+	assert.Equal(t, 2, testCounterVec.expireStatus.CountStatus(metricName), "checkStatusNum")
 
 	//update metric1
 	testCounterVec.WithInc(pod1Labels)
 	ms = collectMetrics(vec)
 	assert.Equal(t, 2, len(ms), "checkMetricsNum")
+	assert.Equal(t, 2, testCounterVec.expireStatus.CountStatus(metricName), "checkStatusNum")
+
+	// delete metric1
+	testCounterVec.Delete(pod1Labels)
+	ms = collectMetrics(vec)
+	assert.Equal(t, 1, len(ms), "checkMetricsNum")
+	assert.Equal(t, 1, testCounterVec.expireStatus.CountStatus(metricName), "checkStatusNum")
+}
+
+func Test_GCHistogramVec(t *testing.T) {
+	metricName := "test_histogram"
+	vec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Subsystem: testSubsystem,
+		Name:      metricName,
+		Buckets:   []float64{0.1, 0.5, 1, 2},
+	}, []string{"node", "pod_name", "pod_namespace"})
+
+	testDefaultHistogramVec := NewGCHistogramVec(metricName, vec)
+	assert.Equal(t, vec, testDefaultHistogramVec.GetHistogramVec())
+
+	// Custom MetricGC
+	testMetricGC := NewMetricGC(DefaultExpireTime, DefaultGCInterval).(*metricGC)
+	defer testMetricGC.Stop()
+
+	testHistogramVec := newGCHistogramVec(metricName, vec, testMetricGC)
+
+	// Add metric1
+	pod1Labels := prometheus.Labels{"node": "node1", "pod_name": "pod1", "pod_namespace": "ns1"}
+	testHistogramVec.WithObserve(pod1Labels, 0.3)
+	ms := collectMetrics(vec)
+	assert.Equal(t, 1, len(ms), "checkMetricsNum")
+	assert.Equal(t, 1, testHistogramVec.expireStatus.CountStatus(metricName), "checkStatusNum")
+
+	// Add metric2
+	pod2Labels := prometheus.Labels{"node": "node2", "pod_name": "pod2", "pod_namespace": "ns2"}
+	testHistogramVec.WithObserve(pod2Labels, 1.5)
+	ms = collectMetrics(vec)
+	assert.Equal(t, 2, len(ms), "checkMetricsNum")
+	assert.Equal(t, 2, testHistogramVec.expireStatus.CountStatus(metricName), "checkStatusNum")
+
+	// Update metric1
+	testHistogramVec.WithObserve(pod1Labels, 0.7)
+	ms = collectMetrics(vec)
+	assert.Equal(t, 2, len(ms), "checkMetricsNum")
+	assert.Equal(t, 2, testHistogramVec.expireStatus.CountStatus(metricName), "checkStatusNum")
+
+	// Delete metric1
+	testHistogramVec.Delete(pod1Labels)
+	ms = collectMetrics(vec)
+	assert.Equal(t, 1, len(ms), "checkMetricsNum")
+	assert.Equal(t, 1, testHistogramVec.expireStatus.CountStatus(metricName), "checkStatusNum")
 }
 
 func Test_MetricGC_GC(t *testing.T) {
@@ -124,7 +186,8 @@ func Test_MetricGC_GC(t *testing.T) {
 	metricsUpdate := generatePodMetrics(5, time.Now().Unix()-int64(DefaultExpireTime/time.Second))
 	for _, m := range metricsUpdate {
 		gcGaugeVec.WithSet(m.labels, m.value)
-		testMetricGC.updateStatus(m.updateTime, metricName, m.labels)
+		err := testMetricGC.updateStatus(m.updateTime, metricName, m.labels)
+		assert.NoError(t, err)
 	}
 	time.Sleep(10 * time.Millisecond)
 	gotMetrics = collectMetrics(gaugeVec)

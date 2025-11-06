@@ -100,12 +100,13 @@ func (s *nodeInformer) HasSynced() bool {
 	if s.nodeInformer == nil {
 		return false
 	}
-	synced := s.nodeInformer.HasSynced()
+	// maybe the cache has synced ,but the event handlers haven't beed called yet
+	synced := s.nodeInformer.HasSynced() && s.GetNode() != nil
 	klog.V(5).Infof("node informer has synced %v", synced)
 	return synced
 }
 
-func newNodeInformer(client clientset.Interface, nodeName string) cache.SharedIndexInformer {
+var newNodeInformer = func(client clientset.Interface, nodeName string) cache.SharedIndexInformer {
 	tweakListOptionsFunc := func(opt *metav1.ListOptions) {
 		opt.FieldSelector = "metadata.name=" + nodeName
 	}
@@ -125,32 +126,6 @@ func newNodeInformer(client clientset.Interface, nodeName string) cache.SharedIn
 		time.Hour*12,
 		cache.Indexers{},
 	)
-}
-
-func (s *nodeInformer) setupNodeInformer() {
-	s.nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			node, ok := obj.(*corev1.Node)
-			if ok {
-				s.syncNode(node)
-			} else {
-				klog.Errorf("node informer add func parse Node failed, obj %T", obj)
-			}
-		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			oldNode, oldOK := oldObj.(*corev1.Node)
-			newNode, newOK := newObj.(*corev1.Node)
-			if !oldOK || !newOK {
-				klog.Errorf("unable to convert object to *corev1.Node, old %T, new %T", oldObj, newObj)
-				return
-			}
-			if reflect.DeepEqual(oldNode, newNode) {
-				klog.V(5).Infof("find node %s has not changed", newNode.Name)
-				return
-			}
-			s.syncNode(newNode)
-		},
-	})
 }
 
 func (s *nodeInformer) syncNode(newNode *corev1.Node) {
@@ -206,4 +181,10 @@ func recordNodeResources(node *corev1.Node) {
 	metrics.RecordNodeResourceAllocatable(string(apiext.BatchCPU), metrics.UnitInteger, float64(batchCPU.Value()))
 	batchMemory := node.Status.Allocatable.Name(apiext.BatchMemory, resource.BinarySI)
 	metrics.RecordNodeResourceAllocatable(string(apiext.BatchMemory), metrics.UnitByte, float64(batchMemory.Value()))
+
+	// record node allocatable of MidCPU & MidMemory
+	midCPU := node.Status.Allocatable.Name(apiext.MidCPU, resource.DecimalSI)
+	metrics.RecordNodeResourceAllocatable(string(apiext.MidCPU), metrics.UnitInteger, float64(midCPU.Value()))
+	midMemory := node.Status.Allocatable.Name(apiext.MidMemory, resource.BinarySI)
+	metrics.RecordNodeResourceAllocatable(string(apiext.MidMemory), metrics.UnitByte, float64(midMemory.Value()))
 }

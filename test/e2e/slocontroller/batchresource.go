@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -39,14 +39,14 @@ import (
 
 const colocationEnabledConfigData = `{
   "enable": true,
-  "cpuReclaimThresholdPercent": 80,
-  "memoryReclaimThresholdPercent": 80,
+  "cpuReclaimThresholdPercent": 95,
+  "memoryReclaimThresholdPercent": 95,
   "memoryCalculatePolicy": "usage"
 }`
 
 var (
-	cpuReclaimThresholdPercent    = 80
-	memoryReclaimThresholdPercent = 80
+	cpuReclaimThresholdPercent    = 95
+	memoryReclaimThresholdPercent = 95
 	maxNodeBatchCPUDiffPercent    = 10
 	maxNodeBatchMemoryDiffPercent = 5
 

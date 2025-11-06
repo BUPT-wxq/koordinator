@@ -126,12 +126,19 @@ func (n *nodeResourceCollector) collectNodeResUsed() {
 	}
 	nodeMetrics = append(nodeMetrics, cpuUsageMetrics)
 
-	for _, deviceCollector := range n.deviceCollectors {
-		if metric, _ := deviceCollector.GetNodeMetric(); metric != nil {
+	for name, deviceCollector := range n.deviceCollectors {
+		if !deviceCollector.Enabled() {
+			klog.V(6).Infof("skip node metrics from the disabled device collector %s", name)
+			continue
+		}
+
+		if metric, err := deviceCollector.GetNodeMetric(); err != nil {
+			klog.Warningf("get node metrics from the device collector %s failed, err: %s", name, err)
+		} else {
 			nodeMetrics = append(nodeMetrics, metric...)
 		}
 		if info := deviceCollector.Infos(); info != nil {
-			n.metricDB.Set(koordletutil.GPUDeviceType, info)
+			n.metricDB.Set(info.Type(), info)
 		}
 	}
 
@@ -152,6 +159,7 @@ func (n *nodeResourceCollector) collectNodeResUsed() {
 	// update collect time
 	n.started.Store(true)
 	metrics.RecordNodeUsedCPU(cpuUsageValue) // in cpu cores
+	metrics.RecordNodeUsedMemory(memUsageValue)
 
 	klog.V(4).Infof("collectNodeResUsed finished, count %v, cpu[%v], mem[%v]",
 		len(nodeMetrics), cpuUsageValue, memUsageValue)

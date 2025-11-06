@@ -27,14 +27,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
 	slov1alpha1 "github.com/koordinator-sh/koordinator/apis/slo/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/slo-controller/config"
 	"github.com/koordinator-sh/koordinator/pkg/slo-controller/metrics"
@@ -123,7 +121,7 @@ func (r *NodeResourceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{Requeue: true}, err
 	}
 
-	// do other node updates. e.g. update device resources
+	// do other node updates.
 	if err := r.updateNodeExtensions(node, nodeMetric, podList); err != nil {
 		klog.ErrorS(err, "failed to update node extensions for node", "node", node.Name)
 		return ctrl.Result{Requeue: true}, err
@@ -186,9 +184,8 @@ func (r *NodeResourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		Named(Name). // avoid conflict with others reconciling `Node`
 		For(&corev1.Node{}).
-		Watches(&source.Kind{Type: &slov1alpha1.NodeMetric{}}, &EnqueueRequestForNodeMetric{syncContext: r.NodeSyncContext}).
-		Watches(&source.Kind{Type: &corev1.ConfigMap{}}, cfgHandler).
-		Watches(&source.Kind{Type: &schedulingv1alpha1.Device{}}, &EnqueueRequestForDevice{syncContext: r.GPUSyncContext})
+		Watches(&slov1alpha1.NodeMetric{}, &EnqueueRequestForNodeMetric{syncContext: r.NodeSyncContext}).
+		Watches(&corev1.ConfigMap{}, cfgHandler)
 
 	// setup plugins
 	// allow plugins to mutate controller via the builder

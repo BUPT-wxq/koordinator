@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -58,15 +59,27 @@ func GetPodSandboxContainerID(pod *corev1.Pod) (string, error) {
 	}
 
 	// get runtime type and dir names of known containers
-	containerSubDirNames := make(map[string]struct{}, len(pod.Status.ContainerStatuses))
+	containerSubDirNames := make(map[string]struct{}, len(pod.Status.ContainerStatuses)+len(pod.Status.InitContainerStatuses))
 	containerRuntime := system.RuntimeTypeUnknown
+	for _, containerStat := range pod.Status.InitContainerStatuses {
+		runtimeType, containerDirName, err := system.CgroupPathFormatter.ContainerDirFn(containerStat.ContainerID)
+		if err != nil {
+			return "", err
+		}
+		containerSubDirNames[containerDirName] = struct{}{}
+		if containerRuntime == system.RuntimeTypeUnknown {
+			containerRuntime = runtimeType
+		}
+	}
 	for _, containerStat := range pod.Status.ContainerStatuses {
 		runtimeType, containerDirName, err := system.CgroupPathFormatter.ContainerDirFn(containerStat.ContainerID)
 		if err != nil {
 			return "", err
 		}
 		containerSubDirNames[containerDirName] = struct{}{}
-		containerRuntime = runtimeType
+		if containerRuntime == system.RuntimeTypeUnknown {
+			containerRuntime = runtimeType
+		}
 	}
 
 	sandboxCandidates := make([]string, 0)
@@ -79,7 +92,13 @@ func GetPodSandboxContainerID(pod *corev1.Pod) (string, error) {
 			continue
 		}
 		if _, exist := containerSubDirNames[containerDir.Name()]; !exist {
-			sandboxCandidates = append(sandboxCandidates, containerDir.Name())
+			if strings.HasPrefix(containerDir.Name(), "crio-") {
+				if !strings.HasSuffix(containerDir.Name(), ".scope") {
+					sandboxCandidates = append(sandboxCandidates, containerDir.Name())
+				}
+			} else {
+				sandboxCandidates = append(sandboxCandidates, containerDir.Name())
+			}
 		}
 	}
 

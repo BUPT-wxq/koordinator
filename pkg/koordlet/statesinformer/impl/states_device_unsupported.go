@@ -23,6 +23,10 @@ func (s *statesInformer) reportDevice() {
 	return
 }
 
+func (s *statesInformer) reportRDMADevice() { return }
+
+func (s *statesInformer) reportXPUDevice() { return }
+
 func (s *statesInformer) initGPU() bool {
 	return false
 }

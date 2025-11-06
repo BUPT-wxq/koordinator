@@ -31,7 +31,10 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/elasticquota"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/loadaware"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/nodenumaresource"
+	noderesourcesfitplus "github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/noderesourcefitplus"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/reservation"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/scarceresourceavoidance"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/schedulinghint"
 
 	// Ensure metric package is initialized
 	_ "k8s.io/component-base/metrics/prometheus/clientgo"
@@ -40,13 +43,16 @@ import (
 )
 
 var koordinatorPlugins = map[string]frameworkruntime.PluginFactory{
-	loadaware.Name:        loadaware.New,
-	nodenumaresource.Name: nodenumaresource.New,
-	reservation.Name:      reservation.New,
-	coscheduling.Name:     coscheduling.New,
-	deviceshare.Name:      deviceshare.New,
-	elasticquota.Name:     elasticquota.New,
-	defaultprebind.Name:   defaultprebind.New,
+	loadaware.Name:               loadaware.New,
+	nodenumaresource.Name:        nodenumaresource.New,
+	reservation.Name:             reservation.New,
+	coscheduling.Name:            coscheduling.New,
+	deviceshare.Name:             deviceshare.New,
+	elasticquota.Name:            elasticquota.New,
+	defaultprebind.Name:          defaultprebind.New,
+	noderesourcesfitplus.Name:    noderesourcesfitplus.New,
+	scarceresourceavoidance.Name: scarceresourceavoidance.New,
+	schedulinghint.Name:          schedulinghint.New,
 }
 
 func flatten(plugins map[string]frameworkruntime.PluginFactory) []app.Option {

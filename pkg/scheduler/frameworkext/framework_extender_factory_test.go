@@ -17,11 +17,22 @@ limitations under the License.
 package frameworkext
 
 import (
+	"context"
+	"fmt"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/informers"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8smetrics "k8s.io/component-base/metrics"
+	"k8s.io/component-base/metrics/testutil"
+	"k8s.io/kubernetes/pkg/scheduler"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	frameworkfake "k8s.io/kubernetes/pkg/scheduler/framework/fake"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
@@ -29,9 +40,11 @@ import (
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	schedulertesting "k8s.io/kubernetes/pkg/scheduler/testing"
 
+	"github.com/koordinator-sh/koordinator/apis/extension"
 	koordfake "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned/fake"
 	koordinformers "github.com/koordinator-sh/koordinator/pkg/client/informers/externalversions"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/services"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/metrics"
 )
 
 func TestExtenderFactory(t *testing.T) {
@@ -54,10 +67,15 @@ func TestExtenderFactory(t *testing.T) {
 		schedulertesting.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 		schedulertesting.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
 	}
+	fakeClient := kubefake.NewSimpleClientset()
+	sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 	fh, err := schedulertesting.NewFramework(
+		context.TODO(),
 		registeredPlugins,
 		"koord-scheduler",
 		frameworkruntime.WithSnapshotSharedLister(fakeNodeInfoLister{NodeInfoLister: frameworkfake.NodeInfoLister{}}),
+		frameworkruntime.WithClientSet(fakeClient),
+		frameworkruntime.WithInformerFactory(sharedInformerFactory),
 	)
 	assert.NoError(t, err)
 	pl, err := proxyNew(nil, fh)
@@ -71,4 +89,338 @@ func TestExtenderFactory(t *testing.T) {
 	assert.Len(t, impl.preFilterTransformers, 1)
 	assert.Len(t, impl.filterTransformers, 1)
 	assert.Len(t, impl.scoreTransformers, 1)
+	assert.Len(t, impl.postFilterTransformers, 1)
+}
+
+func TestCopyQueueInfoToPod(t *testing.T) {
+	tests := []struct {
+		name             string
+		podHasQueueInfo  *corev1.Pod
+		podNeedQueueInfo *corev1.Pod
+		wantOriginal     *corev1.Pod
+		want             *corev1.Pod
+	}{
+		{
+			name: "normal flow",
+			podHasQueueInfo: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: initialTimestampManager, Time: &metav1.Time{}},
+						{Manager: attemptsManager, Subresource: strconv.Itoa(1)},
+					},
+				},
+			},
+			podNeedQueueInfo: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: "original manager"},
+					},
+				},
+			},
+			wantOriginal: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: "original manager"},
+					},
+				},
+			},
+			want: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: initialTimestampManager, Time: &metav1.Time{}},
+						{Manager: attemptsManager, Subresource: strconv.Itoa(1)},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CopyQueueInfoToPod(tt.podHasQueueInfo, tt.podNeedQueueInfo)
+			assert.Equal(t, tt.wantOriginal, tt.podNeedQueueInfo)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRecordPodQueueInfoToPod(t *testing.T) {
+	initialTimestamp := time.Now()
+	tests := []struct {
+		name            string
+		originalPod     *corev1.Pod
+		podInfo         *framework.QueuedPodInfo
+		wantPod         *corev1.Pod
+		wantOriginalPod *corev1.Pod
+	}{
+		{
+			name:            "podInfo is nil",
+			originalPod:     nil,
+			podInfo:         nil,
+			wantPod:         nil,
+			wantOriginalPod: nil,
+		},
+		{
+			name:        "normal flow",
+			originalPod: &corev1.Pod{},
+			podInfo: &framework.QueuedPodInfo{
+				PodInfo:                 &framework.PodInfo{},
+				Attempts:                1,
+				InitialAttemptTimestamp: &initialTimestamp,
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: initialTimestampManager, Time: &metav1.Time{Time: initialTimestamp}},
+						{Manager: attemptsManager, Subresource: strconv.Itoa(1)},
+					},
+				},
+			},
+			wantOriginalPod: &corev1.Pod{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.originalPod != nil {
+				tt.podInfo.Pod = tt.originalPod
+			}
+			RecordPodQueueInfoToPod(tt.podInfo)
+			assert.Equal(t, tt.wantOriginalPod, tt.originalPod)
+			if tt.wantPod != nil {
+				assert.Equal(t, tt.wantPod, tt.podInfo.PodInfo.Pod)
+			} else {
+				assert.Nil(t, tt.podInfo)
+			}
+		})
+	}
+}
+
+func Test_makePodInfoFromPod(t *testing.T) {
+	initialTimestamp := time.Now()
+	tests := []struct {
+		name    string
+		pod     *corev1.Pod
+		want    *framework.QueuedPodInfo
+		wantErr assert.ErrorAssertionFunc
+	}{
+		{
+			name: "normal flow",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{Manager: initialTimestampManager, Time: &metav1.Time{Time: initialTimestamp}},
+						{Manager: attemptsManager, Subresource: strconv.Itoa(1)},
+					},
+				},
+			},
+			want: &framework.QueuedPodInfo{
+				PodInfo: &framework.PodInfo{
+					Pod: &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							ManagedFields: []metav1.ManagedFieldsEntry{
+								{Manager: initialTimestampManager, Time: &metav1.Time{Time: initialTimestamp}},
+								{Manager: attemptsManager, Subresource: strconv.Itoa(1)},
+							},
+						},
+					},
+				},
+				InitialAttemptTimestamp: &initialTimestamp,
+				Attempts:                1,
+			},
+			wantErr: assert.NoError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := makePodInfoFromPod(tt.pod)
+			if !tt.wantErr(t, err, fmt.Sprintf("makePodInfoFromPod(%v)", tt.pod)) {
+				return
+			}
+			assert.Equalf(t, tt.want, got, "makePodInfoFromPod(%v)", tt.pod)
+		})
+	}
+}
+
+func TestCollectSchedulePodResult(t *testing.T) {
+	tests := []struct {
+		name           string
+		scheduleResult scheduler.ScheduleResult
+		err            error
+		expected       [4]int
+	}{
+		{
+			name:     "empty return",
+			expected: [4]int{},
+		},
+		{
+			name: "scheduled",
+			scheduleResult: scheduler.ScheduleResult{
+				SuggestedHost:  "test-node",
+				EvaluatedNodes: 10,
+				FeasibleNodes:  5,
+			},
+			expected: [4]int{1, 10, 1, 5},
+		},
+		{
+			name:     "unschedulable",
+			err:      &framework.FitError{NumAllNodes: 20},
+			expected: [4]int{},
+		},
+		{
+			name:     "unknown error",
+			err:      fmt.Errorf("unknown error"),
+			expected: [4]int{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metricsRegistry := testutil.NewFakeKubeRegistry("0.0.0")
+			histograms := [2]*k8smetrics.Histogram{
+				metrics.PodSchedulingEvaluatedNodes,
+				metrics.PodSchedulingFeasibleNodes,
+			}
+			for _, h := range histograms {
+				h.ClearState()
+				metricsRegistry.MustRegister(h)
+			}
+			mockSched := &scheduler.Scheduler{
+				SchedulePod: func(ctx context.Context, _ framework.Framework, _ *framework.CycleState, _ *corev1.Pod) (scheduler.ScheduleResult, error) {
+					return tt.scheduleResult, tt.err
+				},
+			}
+			f := &FrameworkExtenderFactory{}
+			f.CollectSchedulePodResult(mockSched)
+			mockSched.SchedulePod(context.TODO(), nil, nil, nil)
+			for i, h := range histograms {
+				m := h.WithContext(context.TODO())
+				count, err := testutil.GetHistogramMetricCount(m)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected[i*2], int(count))
+				sum, err := testutil.GetHistogramMetricValue(m)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected[i*2+1], int(sum))
+			}
+		})
+	}
+}
+
+func Test_recordScheduleDiagnosis(t *testing.T) {
+	tests := []struct {
+		name          string
+		pod           *corev1.Pod
+		err           error
+		wantDiagnosis Diagnosis
+	}{
+		{
+			name: "prefilterFailed",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						extension.LabelQuestionedObjectKey: "default/test-pod",
+					},
+				},
+				Status: corev1.PodStatus{
+					NominatedNodeName: "nominatedNode",
+				},
+			},
+			err: &framework.FitError{
+				Pod:         nil,
+				NumAllNodes: 0,
+				Diagnosis: framework.Diagnosis{
+					PreFilterMsg: "preFilterMessage",
+					NodeToStatusMap: map[string]*framework.Status{
+						"node1": framework.NewStatus(framework.UnschedulableAndUnresolvable, "node1Message"),
+					},
+				},
+			},
+			wantDiagnosis: Diagnosis{
+				Timestamp:     metav1.Time{},
+				QuestionedKey: "default/test-pod",
+				TargetPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+						Labels: map[string]string{
+							extension.LabelQuestionedObjectKey: "default/test-pod",
+						},
+					},
+					Status: corev1.PodStatus{
+						NominatedNodeName: "nominatedNode",
+					},
+				},
+				NominatedNode:        "nominatedNode",
+				PreFilterMessage:     "preFilterMessage",
+				TopologyKeyToExplain: "",
+				IsRootCausePod:       true,
+				ScheduleDiagnosis: &ScheduleDiagnosis{
+					SchedulingMode: PodSchedulingMode,
+				},
+				PreemptionDiagnosis: nil,
+			},
+		},
+		{
+			name: "normal flow",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						extension.LabelQuestionedObjectKey: "default/test-pod",
+					},
+				},
+				Status: corev1.PodStatus{
+					NominatedNodeName: "nominatedNode",
+				},
+			},
+			err: &framework.FitError{
+				Pod:         nil,
+				NumAllNodes: 0,
+				Diagnosis: framework.Diagnosis{
+					NodeToStatusMap: map[string]*framework.Status{
+						"node1": framework.NewStatus(framework.UnschedulableAndUnresolvable, "node1Message"),
+					},
+				},
+			},
+			wantDiagnosis: Diagnosis{
+				Timestamp:     metav1.Time{},
+				QuestionedKey: "default/test-pod",
+				TargetPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+						Labels: map[string]string{
+							extension.LabelQuestionedObjectKey: "default/test-pod",
+						},
+					},
+					Status: corev1.PodStatus{
+						NominatedNodeName: "nominatedNode",
+					},
+				},
+				NominatedNode:        "nominatedNode",
+				TopologyKeyToExplain: "",
+				IsRootCausePod:       true,
+				ScheduleDiagnosis: &ScheduleDiagnosis{
+					SchedulingMode: PodSchedulingMode,
+
+					NodeToStatusMap: map[string]*framework.Status{
+						"node1": framework.NewStatus(framework.UnschedulableAndUnresolvable, "node1Message"),
+					},
+				},
+				PreemptionDiagnosis: nil,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nowFunc = func() metav1.Time {
+				return metav1.NewTime(time.Time{})
+			}
+			cycleState := framework.NewCycleState()
+			InitDiagnosis(cycleState, tt.pod)
+			recordScheduleDiagnosis(cycleState, tt.err)
+			diagnosis := GetDiagnosis(cycleState)
+			assert.Equal(t, tt.wantDiagnosis, *diagnosis)
+		})
+	}
 }

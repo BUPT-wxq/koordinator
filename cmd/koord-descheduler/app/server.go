@@ -23,11 +23,13 @@ import (
 	"net/http"
 	"os"
 	goruntime "runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	genericapifilters "k8s.io/apiserver/pkg/endpoints/filters"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/server"
@@ -35,6 +37,7 @@ import (
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/mux"
 	"k8s.io/apiserver/pkg/server/routes"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/record"
@@ -42,6 +45,8 @@ import (
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/configz"
 	"k8s.io/component-base/logs"
+	logsapi "k8s.io/component-base/logs/api/v1"
+	"k8s.io/component-base/metrics/features"
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/term"
 	"k8s.io/component-base/version"
@@ -62,6 +67,11 @@ import (
 	frameworkruntime "github.com/koordinator-sh/koordinator/pkg/descheduler/framework/runtime"
 	"github.com/koordinator-sh/koordinator/pkg/util/transformer"
 )
+
+func init() {
+	utilruntime.Must(logsapi.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
+	utilruntime.Must(features.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
+}
 
 // Option configures a framework.Registry.
 type Option func(frameworkruntime.Registry) error
@@ -107,7 +117,7 @@ func NewDeschedulerCommand(registryOptions ...Option) *cobra.Command {
 func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Option) error {
 	// Activate logging as soon as possible, after that
 	// show flags with the final logging configuration.
-	if err := opts.Logs.ValidateAndApply(nil); err != nil {
+	if err := logsapi.ValidateAndApply(opts.Logs, utilfeature.DefaultFeatureGate); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
@@ -167,12 +177,23 @@ func Run(ctx context.Context, cc *deschedulerappconfig.CompletedConfig, desched 
 	}
 
 	// Start up the healthz server.
+	gracefulShutdownSecureServer := func() {}
 	if cc.SecureServing != nil {
 		handler := buildHandlerChain(newHealthzAndMetricsHandler(&cc.ComponentConfig, checks...))
-		// TODO: handle stoppedCh and listenerStoppedCh returned by c.SecureServing.Serve
-		if _, _, err := cc.SecureServing.Serve(handler, 0, ctx.Done()); err != nil {
+		internalStopCh := make(chan struct{})
+		shutdownTimeout := 5 * time.Second
+		stoppedCh, listenerStoppedCh, err := cc.SecureServing.Serve(handler, shutdownTimeout, internalStopCh)
+		if err != nil {
 			// fail early for secure handlers, removing the old error loop from above
+			close(internalStopCh)
 			return fmt.Errorf("failed to start secure server: %v", err)
+		}
+		gracefulShutdownSecureServer = func() {
+			close(internalStopCh)
+			<-listenerStoppedCh
+			klog.Info("[graceful-termination] secure server has stopped listening")
+			<-stoppedCh
+			klog.Info("[graceful-termination] secure server is exiting")
 		}
 	}
 
@@ -185,6 +206,7 @@ func Run(ctx context.Context, cc *deschedulerappconfig.CompletedConfig, desched 
 				StartDescheduler(ctx, cc)
 			},
 			OnStoppedLeading: func() {
+				gracefulShutdownSecureServer()
 				select {
 				case <-ctx.Done():
 					// We were asked to terminate. Exit 0.
@@ -208,6 +230,7 @@ func Run(ctx context.Context, cc *deschedulerappconfig.CompletedConfig, desched 
 	}
 
 	StartDescheduler(ctx, cc)
+	gracefulShutdownSecureServer()
 	return fmt.Errorf("finished without leader elect")
 }
 
@@ -298,7 +321,8 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 
 	evictionLimiter := evictions.NewEvictionLimiter(
 		cc.ComponentConfig.MaxNoOfPodsToEvictPerNode,
-		cc.ComponentConfig.MaxNoOfPodsToEvictPerNamespace)
+		cc.ComponentConfig.MaxNoOfPodsToEvictPerNamespace,
+		cc.ComponentConfig.MaxNoOfPodsToEvictTotal)
 
 	desched, err := descheduler.New(
 		cc.Client,

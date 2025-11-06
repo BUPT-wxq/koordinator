@@ -20,18 +20,19 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/koordinator-sh/koordinator/pkg/util"
 	"github.com/koordinator-sh/koordinator/pkg/webhook/cm/plugins"
 	"github.com/koordinator-sh/koordinator/pkg/webhook/cm/plugins/sloconfig"
+	"github.com/koordinator-sh/koordinator/pkg/webhook/metrics"
 )
 
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
@@ -43,8 +44,11 @@ type ConfigMapValidatingHandler struct {
 	Decoder *admission.Decoder
 }
 
-func NewConfigMapValidatingHandler() *ConfigMapValidatingHandler {
-	handler := &ConfigMapValidatingHandler{}
+func NewConfigMapValidatingHandler(c client.Client, d *admission.Decoder) *ConfigMapValidatingHandler {
+	handler := &ConfigMapValidatingHandler{
+		Client:  c,
+		Decoder: d,
+	}
 	return handler
 }
 
@@ -98,9 +102,14 @@ func (h *ConfigMapValidatingHandler) Handle(ctx context.Context, req admission.R
 	pls := h.getPlugins()
 
 	for _, plugin := range pls {
+		start := time.Now()
 		if err = plugin.Validate(ctx, req, obj, oldObj); err != nil {
+			metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+				metrics.ConfigMap, string(req.Operation), err, plugin.Name(), time.Since(start).Seconds())
 			return admission.Errored(http.StatusBadRequest, err)
 		}
+		metrics.RecordWebhookDurationMilliseconds(metrics.ValidatingWebhook,
+			metrics.ConfigMap, string(req.Operation), nil, plugin.Name(), time.Since(start).Seconds())
 	}
 
 	return admission.ValidationResponse(true, "")
@@ -110,7 +119,7 @@ func (h *ConfigMapValidatingHandler) getPlugins() []plugins.ConfigMapPlugin {
 	return []plugins.ConfigMapPlugin{sloconfig.NewPlugin(h.Decoder, h.Client)}
 }
 
-var _ inject.Client = &ConfigMapValidatingHandler{}
+// var _ inject.Client = &ConfigMapValidatingHandler{}
 
 // InjectClient injects the client into the ValidatingHandler
 func (h *ConfigMapValidatingHandler) InjectClient(c client.Client) error {
@@ -118,7 +127,7 @@ func (h *ConfigMapValidatingHandler) InjectClient(c client.Client) error {
 	return nil
 }
 
-var _ admission.DecoderInjector = &ConfigMapValidatingHandler{}
+// var _ admission.DecoderInjector = &ConfigMapValidatingHandler{}
 
 // InjectDecoder injects the decoder into the ValidatingHandler
 func (h *ConfigMapValidatingHandler) InjectDecoder(d *admission.Decoder) error {

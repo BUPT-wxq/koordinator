@@ -21,11 +21,14 @@ import (
 
 	gocache "github.com/patrickmn/go-cache"
 	"go.uber.org/atomic"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	slov1alpha1 "github.com/koordinator-sh/koordinator/apis/slo/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metriccache"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metrics"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/framework"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/resourceexecutor"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/statesinformer"
@@ -84,6 +87,10 @@ func (h *hostAppCollector) Started() bool {
 	return h.started.Load()
 }
 
+var (
+	defaultMemoryCollectPolicy slov1alpha1.NodeMemoryCollectPolicy = slov1alpha1.UsageWithoutPageCache
+)
+
 func (h *hostAppCollector) collectHostAppResUsed() {
 	klog.V(6).Info("start collectHostAppResUsed")
 	nodeSLO := h.statesInformer.GetNodeSLO()
@@ -91,18 +98,29 @@ func (h *hostAppCollector) collectHostAppResUsed() {
 		klog.Warningf("get nil node slo during collect host application resource usage")
 		return
 	}
+
+	nodeMetricSpec := h.statesInformer.GetNodeMetricSpec()
+	nodeMemoryCollectPolicy := defaultMemoryCollectPolicy
+	if nodeMetricSpec == nil {
+		klog.Warningf("get nil nodemetric, use default node memory collect policy: %v", defaultMemoryCollectPolicy)
+	} else if nodeMetricSpec.CollectPolicy != nil && nodeMetricSpec.CollectPolicy.NodeMemoryCollectPolicy != nil {
+		nodeMemoryCollectPolicy = *nodeMetricSpec.CollectPolicy.NodeMemoryCollectPolicy
+	}
+
 	count := 0
-	metrics := make([]metriccache.MetricSample, 0)
+	resourceMetrics := make([]metriccache.MetricSample, 0)
 	allCPUUsageCores := metriccache.Point{Timestamp: timeNow(), Value: 0}
 	allMemoryUsage := metriccache.Point{Timestamp: timeNow(), Value: 0}
+	metrics.ResetHostApplicationResourceUsage()
 	for _, hostApp := range nodeSLO.Spec.HostApplications {
 		collectTime := timeNow()
 		cgroupDir := util.GetHostAppCgroupRelativePath(&hostApp)
 		currentCPUUsage, errCPU := h.cgroupReader.ReadCPUAcctUsage(cgroupDir)
 		memStat, errMem := h.cgroupReader.ReadMemoryStat(cgroupDir)
-		if errCPU != nil || errMem != nil {
-			klog.V(4).Infof("cannot collect host application resource usage, cpu reason %v, memory reason %v",
-				errCPU, errMem)
+		memUsageWithPageCache, errMem2 := h.cgroupReader.ReadMemoryUsage(cgroupDir)
+		if errCPU != nil || errMem != nil || errMem2 != nil {
+			klog.V(4).Infof("cannot collect host application resource usage, cpu reason %v, memoryStat reason %v, memoryUsage reason %v",
+				errCPU, errMem, errMem2)
 			continue
 		}
 		if memStat == nil {
@@ -135,19 +153,38 @@ func (h *hostAppCollector) collectHostAppResUsed() {
 			metriccache.MetricPropertiesFunc.HostApplication(hostApp.Name),
 			collectTime, float64(memoryUsageValue))
 		if err != nil {
-			klog.V(4).Infof("failed to generate memory metrics for host application %s , err %v", hostApp.Name, err)
+			klog.V(4).Infof("failed to generate memoryUsage metrics for host application %s , err %v", hostApp.Name, err)
 			return
 		}
 
-		metrics = append(metrics, cpuUsageMetric, memUsageMetric)
+		memUsageWithPageCacheMetric, err := metriccache.HostAppMemoryUsageWithPageCacheMetric.GenerateSample(
+			metriccache.MetricPropertiesFunc.HostApplication(hostApp.Name),
+			collectTime, float64(memUsageWithPageCache))
+		if err != nil {
+			klog.V(4).Infof("failed to generate memoryUsageWithPageCache metrics for host application %s , err %v", hostApp.Name, err)
+			return
+		}
+
+		metrics.RecordHostApplicationResourceUsage(string(corev1.ResourceCPU), &hostApp, cpuUsageValue)
+		metrics.RecordHostApplicationResourceUsage(string(corev1.ResourceMemory), &hostApp, float64(memoryUsageValue))
+		resourceMetrics = append(resourceMetrics, cpuUsageMetric, memUsageMetric, memUsageWithPageCacheMetric)
 		klog.V(6).Infof("collect host application %v finished, metric cpu=%v, memory=%v", hostApp.Name, cpuUsageValue, memoryUsageValue)
 		count++
 		allCPUUsageCores.Value += cpuUsageValue
-		allMemoryUsage.Value += float64(memoryUsageValue)
+		// sum memory usage according to NodeMemoryCollectPolicy
+		switch nodeMemoryCollectPolicy {
+		case slov1alpha1.UsageWithoutPageCache:
+			allMemoryUsage.Value += float64(memoryUsageValue)
+		case slov1alpha1.UsageWithPageCache:
+			allMemoryUsage.Value += float64(memUsageWithPageCache)
+		default:
+			klog.Warning("unrecognized node memory collect policy, use UsageWithoutPageCache as default")
+			allMemoryUsage.Value += float64(memoryUsageValue)
+		}
 	}
 
 	appender := h.appendableDB.Appender()
-	if err := appender.Append(metrics); err != nil {
+	if err := appender.Append(resourceMetrics); err != nil {
 		klog.Warningf("Append host application metrics error: %v", err)
 		return
 	}

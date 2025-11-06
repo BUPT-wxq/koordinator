@@ -22,11 +22,13 @@ const (
 	ReasonUpdateCgroups      = "UpdateCgroups"
 	ReasonUpdateSystemConfig = "UpdateSystemConfig"
 	ReasonUpdateResctrl      = "UpdateResctrl" // update resctrl tasks, schemata
+	CreateCATGroup           = "CreateCATGroup"
 
-	EvictPodByNodeMemoryUsage   = "EvictPodByNodeMemoryUsage"
-	EvictPodByBECPUSatisfaction = "EvictPodByBECPUSatisfaction"
-
-	AdjustBEByNodeCPUUsage = "AdjustBEByNodeCPUUsage"
+	EvictBEPodByNodeMemoryUsage          = "EvictBEPodByNodeMemoryUsage"
+	EvictPodByMemoryUsedThresholdPercent = "EvictPodByMemoryUsedThresholdPercent"
+	EvictBEPodByBECPUSatisfaction        = "EvictBEPodByBECPUSatisfaction"
+	EvictPodByCPUUsedThresholdPercent    = "EvictPodByCPUUsedThresholdPercent"
+	AdjustBEByNodeCPUUsage               = "AdjustBEByNodeCPUUsage"
 )
 
 var Conf = NewDefaultConfig()

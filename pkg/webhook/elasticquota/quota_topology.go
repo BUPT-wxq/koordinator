@@ -21,16 +21,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
+
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
 	utilclient "github.com/koordinator-sh/koordinator/pkg/util/client"
+	"github.com/koordinator-sh/koordinator/pkg/webhook/metrics"
 )
 
 type quotaTopology struct {
@@ -87,6 +90,9 @@ func (qt *quotaTopology) ValidAddQuota(quota *v1alpha1.ElasticQuota) error {
 
 	qt.quotaInfoMap[quotaInfo.Name] = quotaInfo
 	qt.quotaHierarchyInfo[quotaInfo.Name] = make(map[string]struct{})
+	if qt.quotaHierarchyInfo[quotaInfo.ParentName] == nil {
+		qt.quotaHierarchyInfo[quotaInfo.ParentName] = make(map[string]struct{})
+	}
 	qt.quotaHierarchyInfo[quotaInfo.ParentName][quotaInfo.Name] = struct{}{}
 	for _, namespace := range annotationNamespaces {
 		qt.namespaceToQuotaMap[namespace] = quota.Name
@@ -166,7 +172,7 @@ func (qt *quotaTopology) ValidDeleteQuota(quota *v1alpha1.ElasticQuota) error {
 	// check has child quota.
 	if childSet, exist := qt.quotaHierarchyInfo[quotaName]; exist {
 		if len(childSet) > 0 {
-			return fmt.Errorf("delete quota failed, quota%v has child quota", quotaName)
+			return fmt.Errorf("delete quota failed, quota %v has %d child quotas", quotaName, len(childSet))
 		}
 	} else {
 		return fmt.Errorf("BUG quotaMap and quotaTree information out of sync, losed :%v", quotaName)
@@ -181,7 +187,18 @@ func (qt *quotaTopology) ValidDeleteQuota(quota *v1alpha1.ElasticQuota) error {
 		return fmt.Errorf("failed list pods for quota %v, err: %v", quota.Name, err)
 	}
 	if len(podList.Items) > 0 {
-		return fmt.Errorf("delete quota failed, quota %v has child pods", quotaName)
+		podCount := len(podList.Items)
+		var podNames []string
+		if podCount <= 2 {
+			for _, pod := range podList.Items {
+				podNames = append(podNames, pod.Name)
+			}
+		} else {
+			podNames = append(podNames, podList.Items[0].Name, podList.Items[1].Name)
+			podNames = append(podNames, "...")
+		}
+		displayNames := strings.Join(podNames, ", ")
+		return fmt.Errorf("delete quota failed, quota %v has %d child pods: %s", quotaName, podCount, displayNames)
 	}
 
 	delete(qt.quotaHierarchyInfo[quotaInfo.ParentName], quotaName)
@@ -194,8 +211,15 @@ func (qt *quotaTopology) ValidDeleteQuota(quota *v1alpha1.ElasticQuota) error {
 	return nil
 }
 
-// fillQuotaDefaultInformation fills quota with default information if not configure
+// fillQuotaDefaultInformation fills quota with default information if not be configured
 func (qt *quotaTopology) fillQuotaDefaultInformation(quota *v1alpha1.ElasticQuota) error {
+	if quota.Name == extension.RootQuotaName {
+		return nil
+	}
+
+	qt.lock.Lock()
+	defer qt.lock.Unlock()
+
 	if quota.Labels == nil {
 		quota.Labels = make(map[string]string)
 	}
@@ -203,7 +227,7 @@ func (qt *quotaTopology) fillQuotaDefaultInformation(quota *v1alpha1.ElasticQuot
 		quota.Annotations = make(map[string]string)
 	}
 
-	if parentName, exist := quota.Labels[extension.LabelQuotaParent]; (!exist || len(parentName) == 0) && quota.Name != extension.RootQuotaName {
+	if parentName, exist := quota.Labels[extension.LabelQuotaParent]; !exist || len(parentName) == 0 {
 		quota.Labels[extension.LabelQuotaParent] = extension.RootQuotaName
 		klog.V(5).Infof("fill quota %v parent as root", quota.Name)
 	}
@@ -226,9 +250,22 @@ func (qt *quotaTopology) fillQuotaDefaultInformation(quota *v1alpha1.ElasticQuot
 	}
 	if sharedWeight, exist := quota.Annotations[extension.AnnotationSharedWeight]; !exist || len(sharedWeight) == 0 {
 		quota.Annotations[extension.AnnotationSharedWeight] = string(maxQuota)
+		metrics.RecordQuotaSharedWeight(quota.Name, quota.Spec.Max)
 		klog.V(5).Infof("fill quota %v sharedWeight as max", quota.Name)
+	} else {
+		sharedWeightRL := make(corev1.ResourceList)
+		err = json.Unmarshal([]byte(sharedWeight), &sharedWeightRL)
+		if err != nil {
+			return fmt.Errorf("fillDefaultQuotaInfo unmarshal sharedWeight failed:%v", err)
+		}
+		if fixedSharedWeight(sharedWeightRL, quota.Spec.Max) {
+			fixedSharedWeightRL, err := json.Marshal(&sharedWeightRL)
+			if err != nil {
+				return fmt.Errorf("fillDefaultQuotaInfo marshal fixedSharedWeight max failed:%v", err)
+			}
+			quota.Annotations[extension.AnnotationSharedWeight] = string(fixedSharedWeightRL)
+		}
 	}
-
 	return nil
 }
 
@@ -262,4 +299,44 @@ func (qt *quotaTopology) getQuotaTopologyInfo() *QuotaTopologySummary {
 		result.QuotaHierarchyInfo[key] = childQuotas
 	}
 	return result
+}
+
+func (qt *quotaTopology) getQuotaInfo(name, namespace string) *QuotaInfo {
+	qt.lock.Lock()
+	defer qt.lock.Unlock()
+
+	info, ok := qt.quotaInfoMap[name]
+	if ok {
+		return info
+	}
+	quotaName, ok := qt.namespaceToQuotaMap[namespace]
+	if ok {
+		return qt.quotaInfoMap[quotaName]
+	}
+	return nil
+}
+
+// fixedSharedWeight keep keys in sharedWeight and maxQuota same
+// if key in maxQuota not included in sharedWeight, add key/value in sharedWeight
+// if key in sharedWeight not included in maxQuota, delete key/value in sharedWeight
+// if fixed, return true
+func fixedSharedWeight(sharedWeight, maxQuota corev1.ResourceList) bool {
+	fixed := false
+	for key, value := range maxQuota {
+		if _, ok := sharedWeight[key]; !ok {
+			sharedWeight[key] = value
+			fixed = true
+		}
+	}
+	toDeleted := make([]corev1.ResourceName, 0)
+	for key := range sharedWeight {
+		if _, ok := maxQuota[key]; !ok {
+			toDeleted = append(toDeleted, key)
+		}
+	}
+	for _, key := range toDeleted {
+		fixed = true
+		delete(sharedWeight, key)
+	}
+	return fixed
 }

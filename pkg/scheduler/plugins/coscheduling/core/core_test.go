@@ -24,21 +24,23 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/util/retry"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
-	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
-	fakepgclientset "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned/fake"
-	pgformers "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions"
-	pginformer "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
+	"k8s.io/utils/pointer"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
+	"github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
+	fakepgclientset "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/clientset/versioned/fake"
+	pgformers "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions"
+	pginformer "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
 	koordfake "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned/fake"
 	koordinformers "github.com/koordinator-sh/koordinator/pkg/client/informers/externalversions"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
 )
 
@@ -58,16 +60,16 @@ func NewManagerForTest() *Mgr {
 	koordClient := koordfake.NewSimpleClientset()
 	koordInformerFactory := koordinformers.NewSharedInformerFactory(koordClient, 0)
 
-	args := &config.CoschedulingArgs{DefaultTimeout: &metav1.Duration{Duration: 300 * time.Second}}
+	args := &config.CoschedulingArgs{DefaultTimeout: metav1.Duration{Duration: 300 * time.Second}}
 
-	pgManager := NewPodGroupManager(args, pgClient, pgInformerFactory, informerFactory, koordInformerFactory)
+	pgManager := NewPodGroupManager(nil, args, pgClient, pgInformerFactory, informerFactory, koordInformerFactory)
 	return &Mgr{
 		pgMgr:      pgManager,
 		pgInformer: pgInformer,
 	}
 }
 
-func makePg(name, namespace string, min int32, creationTime *time.Time, minResource *corev1.ResourceList) *v1alpha1.PodGroup {
+func makePg(name, namespace string, min int32, creationTime *time.Time, minResource corev1.ResourceList) *v1alpha1.PodGroup {
 	var ti int32 = 10
 	pg := &v1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -82,9 +84,8 @@ func makePg(name, namespace string, min int32, creationTime *time.Time, minResou
 	return pg
 }
 
-func TestPlugin_PreFilter(t *testing.T) {
+func TestPlugin_PreEnqueue(t *testing.T) {
 	gangACreatedTime := time.Now()
-	mgr := NewManagerForTest().pgMgr
 	tests := []struct {
 		name string
 		// test pod
@@ -140,7 +141,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 				st.MakePod().Name("pod3-1").UID("pod3-1").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "ganga").Obj(),
 			},
 			pgs:                        makePg("ganga", "ganga_ns", 4, &gangACreatedTime, nil),
-			expectedErrorMessage:       "gang child pod not collect enough, gangName: ganga_ns/ganga, podName: ganga_ns/pod3",
+			expectedErrorMessage:       "gangGroup [ganga_ns/ganga] basic check: memberGangs [ganga_ns/ganga] child pod not collect enough, current gang: ganga_ns/ganga, podName: ganga_ns/pod3",
 			expectedScheduleCycle:      1,
 			expectedChildCycleMap:      map[string]int{},
 			expectedScheduleCycleValid: true,
@@ -158,8 +159,9 @@ func TestPlugin_PreFilter(t *testing.T) {
 			isNonStrictMode:      true,
 		},
 		{
-			name: "due to reschedule pod6's podScheduleCycle is equal with the gangScheduleCycle",
-			pod:  st.MakePod().Name("pod6").UID("pod6").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangc").Obj(),
+			name: "due to reschedule pod6's podScheduleCycle is equal with the gangScheduleCycle, but pod6's nominatedNodeName is not empty",
+			pod: st.MakePod().Name("pod6").UID("pod6").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangc").
+				NominatedNodeName("N1").Obj(),
 			pods: []*corev1.Pod{
 				st.MakePod().Name("pod6-1").UID("pod6-1").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangc").Obj(),
 				st.MakePod().Name("pod6-2").UID("pod6-2").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangc").Obj(),
@@ -170,27 +172,13 @@ func TestPlugin_PreFilter(t *testing.T) {
 			totalNum:                      5,
 			expectedScheduleCycle:         1,
 			expectedChildCycleMap: map[string]int{
-				"ganga_ns/pod6": 1,
+				"ganga_ns/pod6":   1,
+				"ganga_ns/pod6-1": 1,
+				"ganga_ns/pod6-2": 1,
+				"ganga_ns/pod6-3": 1,
 			},
-			expectedErrorMessage:       "pod's schedule cycle too large, gangName: ganga_ns/gangc, podName: ganga_ns/pod6, podCycle: 1, gangCycle: 1",
+			expectedErrorMessage:       "",
 			expectedScheduleCycleValid: true,
-		},
-		{
-			name: "pods count equal with minMember,is StrictMode,but the gang's scheduleCycle is not valid due to pre pod Filter Failed",
-			pod:  st.MakePod().Name("pod7").UID("pod7").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangd").Obj(),
-			pods: []*corev1.Pod{
-				st.MakePod().Name("pod7-1").UID("pod7-1").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangd").Obj(),
-				st.MakePod().Name("pod7-2").UID("pod7-2").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangd").Obj(),
-				st.MakePod().Name("pod7-3").UID("pod7-3").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "gangd").Obj(),
-			},
-			pgs:                   makePg("gangd", "ganga_ns", 4, &gangACreatedTime, nil),
-			expectedScheduleCycle: 1,
-			expectedChildCycleMap: map[string]int{
-				"ganga_ns/pod7": 1,
-			},
-			expectedScheduleCycleValid: false,
-			expectedErrorMessage:       "gang scheduleCycle not valid, gangName: ganga_ns/gangd, podName: ganga_ns/pod7",
-			shouldSetValidToFalse:      true,
 		},
 		{
 			name: "pods count equal with minMember,is StrictMode, disable check scheduleCycle even if the gang's scheduleCycle is not valid",
@@ -236,6 +224,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 				st.MakePod().Name("pod9-3").UID("pod9-3").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "ganga").Obj(),
 				st.MakePod().Name("pod9-4").UID("pod9-4").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "ganga").Obj(),
 			},
+			pgs:                   makePg("ganga", "ganga_ns", 4, &gangACreatedTime, nil),
 			totalNum:              5,
 			expectedScheduleCycle: 1,
 			expectedChildCycleMap: map[string]int{
@@ -245,12 +234,13 @@ func TestPlugin_PreFilter(t *testing.T) {
 				"ganga_ns/pod9-3": 1,
 				"ganga_ns/pod9-4": 1,
 			},
-			expectedErrorMessage:       "",
+			expectedErrorMessage:       "representative pod ganga_ns/pod9-4 of gangGroupID ganga_ns/ganga already exists",
 			expectedScheduleCycleValid: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			mgr := NewManagerForTest().pgMgr
 			var gang *Gang
 			// first create the podGroup
 			if tt.pgs != nil {
@@ -272,17 +262,11 @@ func TestPlugin_PreFilter(t *testing.T) {
 			// add each neighbor pods and run preFilter
 			for _, pod := range tt.pods {
 				mgr.cache.onPodAdd(pod)
-				mgr.PreFilter(ctx, pod)
+				mgr.PreEnqueue(ctx, pod)
+
 			}
 			mgr.cache.onPodAdd(tt.pod)
 
-			// set pre cases before test pod run
-			if tt.shouldSetValidToFalse {
-				gang.setScheduleCycleValid(false)
-			}
-			if tt.shouldSetCycleEqualWithGlobal {
-				gang.setChildScheduleCycle(tt.pod, 1)
-			}
 			if tt.resourceSatisfied {
 				gang.setResourceSatisfied()
 			}
@@ -293,23 +277,17 @@ func TestPlugin_PreFilter(t *testing.T) {
 				}()
 			}
 			// run the case
-			err := mgr.PreFilter(ctx, tt.pod)
+			// cycleState := framework.NewCycleState()
+			// err := mgr.PreFilter(ctx, cycleState, tt.pod)
+			err := mgr.PreEnqueue(ctx, tt.pod)
 			var returnMessage string
 			if err == nil {
 				returnMessage = ""
 			} else {
 				returnMessage = err.Error()
 			}
-			// assert
-			assert.Equal(t, tt.expectedErrorMessage, returnMessage)
-			if gang != nil && !tt.isNonStrictMode && !tt.shouldSkipCheckScheduleCycle {
-				assert.Equal(t, tt.expectedScheduleCycle, gang.getScheduleCycle())
-				assert.Equal(t, tt.expectedScheduleCycleValid, gang.isScheduleCycleValid())
-				assert.Equal(t, tt.expectedChildCycleMap, gang.ChildrenScheduleRoundMap)
 
-				assert.Equal(t, tt.expectedChildCycleMap[util.GetId(tt.pod.Namespace, tt.pod.Name)],
-					mgr.GetChildScheduleCycle(tt.pod))
-			}
+			assert.Equal(t, tt.expectedErrorMessage, returnMessage)
 		})
 	}
 }
@@ -384,7 +362,7 @@ func TestPermit(t *testing.T) {
 				st.MakePod().Name("pod3-1").UID("pod3-1").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Obj(),
 			},
 			runningPods: []*corev1.Pod{
-				st.MakePod().Name("pod3-2").UID("pod3-2").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Obj(),
+				st.MakePod().Name("pod3-2").UID("pod3-2").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Node("n1").Obj(),
 			},
 			pgs:          []*v1alpha1.PodGroup{makePg("gangA", "gangA_ns", 3, &gangACreatedTime, nil)},
 			onceSatisfy:  true,
@@ -399,7 +377,7 @@ func TestPermit(t *testing.T) {
 				st.MakePod().Name("pod3-1").UID("pod3-1").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Obj(),
 			},
 			runningPods: []*corev1.Pod{
-				st.MakePod().Name("pod3-2").UID("pod3-2").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Obj(),
+				st.MakePod().Name("pod3-2").UID("pod3-2").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Node("n1").Obj(),
 			},
 			pgs:          []*v1alpha1.PodGroup{makePg("gangA", "gangA_ns", 3, &gangACreatedTime, nil)},
 			onceSatisfy:  true,
@@ -469,7 +447,7 @@ func TestPermit(t *testing.T) {
 				gangId := util.GetId(pg.Namespace, pg.Name)
 				gang := mgr.cache.getGangFromCacheByGangId(gangId, false)
 				gang.lock.Lock()
-				gang.OnceResourceSatisfied = tt.onceSatisfy
+				gang.GangGroupInfo.OnceResourceSatisfied = tt.onceSatisfy
 				gang.GangMatchPolicy = tt.matchPolicy
 				gang.lock.Unlock()
 			}
@@ -483,6 +461,9 @@ func TestPermit(t *testing.T) {
 				mgr.cache.onPodAdd(pod)
 				mgr.PostBind(ctx, pod, "tmp")
 			}
+			if len(tt.runningPods) != 0 {
+				assert.Equal(t, int32(len(tt.runningPods)), mgr.GetBoundPodNumber(util.GetId(tt.runningPods[0].Namespace, util.GetGangNameByPod(tt.runningPods[0]))))
+			}
 			mgr.cache.onPodAdd(tt.pod)
 			timeout, status := mgr.Permit(ctx, tt.pod)
 			assert.Equal(t, tt.wantWaittime, timeout)
@@ -491,91 +472,188 @@ func TestPermit(t *testing.T) {
 	}
 }
 
-// Unreserve also tested in the Coscheduling_test
+type fakeEvaluator struct {
+	result *framework.PostFilterResult
+	status *framework.Status
+}
 
-func TestPostBind(t *testing.T) {
+func (f *fakeEvaluator) Preempt(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, m framework.NodeToStatusMap) (*framework.PostFilterResult, *framework.Status) {
+	return f.result, f.status
+}
+
+func TestPodGroupManager_PostFilter(t *testing.T) {
+	type args struct {
+		ctx   context.Context
+		state *framework.CycleState
+		pod   *corev1.Pod
+		m     framework.NodeToStatusMap
+	}
 	tests := []struct {
-		name              string
-		pod               *corev1.Pod
-		pg                *v1alpha1.PodGroup
-		desiredGroupPhase v1alpha1.PodGroupPhase
-		desiredScheduled  int32
-		// case
-		originalScheduled int
-		phase             v1alpha1.PodGroupPhase
-		annotation        map[string]string
+		name                  string
+		args                  args
+		enablePreemption      bool
+		preemptionEvaluator   PreemptionEvaluator
+		gangSchedulingContext *GangSchedulingContext
+		wantPostFilterResult  *framework.PostFilterResult
+		wantStatus            *framework.Status
+		wantFailedMessage     string
 	}{
 		{
-			name:              "pg status convert to scheduled",
-			pod:               st.MakePod().Name("p").UID("p").Namespace("ns1").Label(v1alpha1.PodGroupLabel, "pg").Obj(),
-			pg:                makePg("pg", "ns1", 1, nil, nil),
-			desiredGroupPhase: v1alpha1.PodGroupScheduled,
-			desiredScheduled:  1,
+			name: "preemption not enabled",
+			args: args{
+				state: framework.NewCycleState(),
+				pod:   st.MakePod().Name("pod").UID("pod").Obj(),
+			},
+			wantPostFilterResult: &framework.PostFilterResult{},
+			wantStatus:           framework.NewStatus(framework.Unschedulable),
 		},
 		{
-			name:              "pg status convert to scheduling",
-			pod:               st.MakePod().Name("p").UID("p").Namespace("ns1").Label(v1alpha1.PodGroupLabel, "pg1").Obj(),
-			pg:                makePg("pg1", "ns1", 2, nil, nil),
-			desiredGroupPhase: v1alpha1.PodGroupScheduling,
-			desiredScheduled:  1,
+			name: "bare pod",
+			args: args{
+				state: framework.NewCycleState(),
+				pod:   st.MakePod().Name("pod").UID("pod").Obj(),
+			},
+			enablePreemption: true,
+			preemptionEvaluator: &fakeEvaluator{
+				result: &framework.PostFilterResult{},
+				status: framework.NewStatus(framework.Unschedulable),
+			},
+			wantPostFilterResult: &framework.PostFilterResult{},
+			wantStatus:           framework.NewStatus(framework.Unschedulable),
 		},
 		{
-			name:              "pg status does not convert, although scheduled pods change",
-			pod:               st.MakePod().Name("p").UID("p").Namespace("ns1").Label(v1alpha1.PodGroupLabel, "pg2").Obj(),
-			pg:                makePg("pg2", "ns1", 3, nil, nil),
-			desiredGroupPhase: v1alpha1.PodGroupScheduling,
-			desiredScheduled:  1,
-			phase:             v1alpha1.PodGroupScheduling,
-			originalScheduled: 1,
+			name: "gang pod",
+			args: args{
+				state: framework.NewCycleState(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "pod1",
+						Labels: map[string]string{
+							v1alpha1.PodGroupLabel: "gangA",
+						},
+					},
+				},
+			},
+			enablePreemption: true,
+			gangSchedulingContext: &GangSchedulingContext{
+				gangGroupID: "default/gangA",
+				gangGroup:   sets.New[string]("default/gangA"),
+			},
+			preemptionEvaluator: &fakeEvaluator{
+				result: &framework.PostFilterResult{},
+				status: framework.NewStatus(framework.Unschedulable, "some message"),
+			},
+			wantPostFilterResult: &framework.PostFilterResult{},
+			wantStatus:           framework.NewStatus(framework.Unschedulable, "preemption: some message"),
+			wantFailedMessage:    `GangGroup "default/gangA" gets rejected due to member Pod "default/pod1" is unschedulable with reason "0/0 nodes are available:", alreadyWaitForBound: 0`,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bigMgr := NewManagerForTest()
-			mgr, pginforme := bigMgr.pgMgr, bigMgr.pgInformer
-			// pg create
-			if tt.annotation != nil {
-				if tt.pod.Annotations == nil {
-					tt.pod.Annotations = map[string]string{}
-				}
-				tt.pod.Annotations = tt.annotation
-				mgr.cache.onPodAdd(tt.pod)
+			pgMgr := &PodGroupManager{
+				handle: NewFakeExtendedFramework(t, []*corev1.Node{}, nil, nil, nil, nil),
+				holder: GangSchedulingContextHolder{
+					gangSchedulingContext: tt.gangSchedulingContext,
+				},
+				args: &config.CoschedulingArgs{
+					EnablePreemption: pointer.Bool(tt.enablePreemption),
+				},
+				cache:               NewGangCache(nil, nil, nil, nil, nil),
+				preemptionEvaluator: tt.preemptionEvaluator,
 			}
-			if tt.pg != nil {
-				err := retry.OnError(
-					retry.DefaultRetry,
-					errors.IsTooManyRequests,
-					func() error {
-						var err error
-						_, err = mgr.pgClient.SchedulingV1alpha1().PodGroups(tt.pg.Namespace).Create(context.TODO(), tt.pg, metav1.CreateOptions{})
-						return err
-					})
-				if err != nil {
-					t.Errorf("pgclient create pg err: %v", err)
-				}
-				pginforme.Informer().GetStore().Add(tt.pg)
-				mgr.cache.onPodGroupAdd(tt.pg)
+			frameworkext.InitDiagnosis(tt.args.state, tt.args.pod)
+			got, got1 := pgMgr.PostFilter(tt.args.ctx, tt.args.state, tt.args.pod, tt.args.m)
+			assert.Equalf(t, tt.wantPostFilterResult, got, "PostFilter(%v, %v, %v, %v)", tt.args.ctx, tt.args.state, tt.args.pod, tt.args.m)
+			assert.Equalf(t, tt.wantStatus, got1, "PostFilter(%v, %v, %v, %v)", tt.args.ctx, tt.args.state, tt.args.pod, tt.args.m)
+			if tt.gangSchedulingContext != nil {
+				assert.Equalf(t, tt.wantFailedMessage, tt.gangSchedulingContext.failedMessage, "PostFilter(%v, %v, %v, %v)", tt.args.ctx, tt.args.state, tt.args.pod, tt.args.m)
 			}
-			ctx := context.TODO()
-			// create  pods
-			mgr.cache.onPodAdd(tt.pod)
-			mgr.PostBind(ctx, tt.pod, "test")
-			// get the pg cr
-			var pg *v1alpha1.PodGroup
-			err := retry.OnError(
-				retry.DefaultRetry,
-				errors.IsTooManyRequests,
-				func() error {
-					var err error
-					pg, err = mgr.pgClient.SchedulingV1alpha1().PodGroups(tt.pod.Namespace).Get(context.TODO(), util.GetGangNameByPod(tt.pod), metav1.GetOptions{})
-					return err
-				})
-			if err != nil {
-				t.Errorf("pgclient get pg err: %v", err)
-			}
-			assert.Equal(t, tt.desiredGroupPhase, pg.Status.Phase)
-			assert.Equal(t, tt.desiredScheduled, pg.Status.Scheduled)
 		})
 	}
+}
 
+func TestGetGangBindingInfo(t *testing.T) {
+	gangCreatedTime := time.Now()
+	pg1 := makePg("gangA", "gangA_ns", 2, &gangCreatedTime, nil)
+	pg2 := makePg("gangB", "gangB_ns", 3, &gangCreatedTime, nil)
+	pg2.Annotations = map[string]string{extension.AnnotationGangGroups: "[\"gangB_ns/gangB\",\"gangC_ns/gangC\"]"}
+
+	tests := []struct {
+		name            string
+		pod             *corev1.Pod
+		pods            []*corev1.Pod
+		wantGangGroupId string
+		wantMemberCount int
+		wantNil         bool
+	}{
+		{
+			name:    "pod does not belong to any gang, should return nil",
+			pod:     st.MakePod().Name("pod1").UID("pod1").Namespace("ns1").Obj(),
+			wantNil: true,
+		},
+		{
+			name: "pod belongs to gangA with 2 waiting pods",
+			pod:  st.MakePod().Name("pod3").UID("pod3").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Obj(),
+			pods: []*corev1.Pod{
+				st.MakePod().Name("pod3-1").UID("pod3-1").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "gangA").Obj(),
+			},
+			wantGangGroupId: "gangA_ns/gangA",
+			wantMemberCount: 2,
+			wantNil:         false,
+		},
+		{
+			name: "pod belongs to gangB in gangGroup with 3 total waiting pods",
+			pod:  st.MakePod().Name("pod4").UID("pod4").Namespace("gangB_ns").Label(v1alpha1.PodGroupLabel, "gangB").Obj(),
+			pods: []*corev1.Pod{
+				st.MakePod().Name("pod4-1").UID("pod4-1").Namespace("gangB_ns").Label(v1alpha1.PodGroupLabel, "gangB").Obj(),
+				st.MakePod().Name("pod4-2").UID("pod4-2").Namespace("gangB_ns").Label(v1alpha1.PodGroupLabel, "gangB").Obj(),
+			},
+			wantGangGroupId: "gangB_ns/gangB,gangC_ns/gangC",
+			wantMemberCount: 3,
+			wantNil:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup test manager
+			mgr := NewManagerForTest()
+
+			// Create podgroups
+			mgr.pgInformer.Informer().GetStore().Add(pg1)
+			mgr.pgInformer.Informer().GetStore().Add(pg2)
+			mgr.pgMgr.cache.onPodGroupAdd(pg1)
+			mgr.pgMgr.cache.onPodGroupAdd(pg2)
+
+			// Create and add pods to gang
+			for _, pod := range tt.pods {
+				gangId := util.GetId(pod.Namespace, util.GetGangNameByPod(pod))
+				gang := mgr.pgMgr.cache.getGangFromCacheByGangId(gangId, false)
+				if gang != nil {
+					gang.addAssumedPod(pod)
+				}
+			}
+			// Add test pod to gang
+			if !tt.wantNil {
+				gangId := util.GetId(tt.pod.Namespace, util.GetGangNameByPod(tt.pod))
+				gang := mgr.pgMgr.cache.getGangFromCacheByGangId(gangId, false)
+				if gang != nil {
+					gang.addAssumedPod(tt.pod)
+				}
+			}
+
+			// Act: get gang binding info
+			gangInfo := mgr.pgMgr.GetGangBindingInfo(tt.pod)
+
+			// Assert
+			if tt.wantNil {
+				assert.Nil(t, gangInfo)
+			} else {
+				assert.NotNil(t, gangInfo)
+				assert.Equal(t, tt.wantGangGroupId, gangInfo.GangGroupId)
+				assert.Equal(t, tt.wantMemberCount, gangInfo.MemberCount)
+			}
+		})
+	}
 }

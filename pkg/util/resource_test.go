@@ -136,7 +136,7 @@ func TestMinResourceList(t *testing.T) {
 
 			// compatibility check
 			want1 := quotav1.Subtract(quotav1.Add(tt.args.a, tt.args.b), quotav1.Max(tt.args.a, tt.args.b))
-			assert.True(t, IsResourceListEqualValue(want1, got), fmt.Sprintf("want: %+v, got: %+v", want1, got))
+			assert.True(t, IsResourceListEqualIgnoreZeroValues(want1, got), fmt.Sprintf("want: %+v, got: %+v", want1, got))
 		})
 	}
 }
@@ -248,7 +248,7 @@ func TestIsResourceListEqualValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsResourceListEqualValue(tt.args.a, tt.args.b)
+			got := IsResourceListEqualIgnoreZeroValues(tt.args.a, tt.args.b)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1100,6 +1100,16 @@ func TestLessThanOrEqualEnhanced(t *testing.T) {
 			expect: true,
 		},
 		{
+			name: "a < b, special case: deltaValue.Value() may overflow",
+			a: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1000Gi"),
+			},
+			b: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("39999996Gi"),
+			},
+			expect: true,
+		},
+		{
 			name: "a > b",
 			a: corev1.ResourceList{
 				corev1.ResourceCPU:    *resource.NewQuantity(20, resource.DecimalSI),
@@ -1143,6 +1153,38 @@ func TestLessThanOrEqualEnhanced(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expect, LessThanOrEqualCompletely(tt.a, tt.b))
+		})
+	}
+}
+func TestMinQuant(t *testing.T) {
+	tests := []struct {
+		name      string
+		a         resource.Quantity
+		b         resource.Quantity
+		expectedQ resource.Quantity
+	}{
+		{
+			name:      "a < b",
+			a:         *resource.NewQuantity(10, resource.DecimalSI),
+			b:         *resource.NewQuantity(20, resource.DecimalSI),
+			expectedQ: *resource.NewQuantity(10, resource.DecimalSI),
+		},
+		{
+			name:      "a > b",
+			a:         *resource.NewQuantity(80, resource.DecimalSI),
+			b:         *resource.NewQuantity(20, resource.DecimalSI),
+			expectedQ: *resource.NewQuantity(20, resource.DecimalSI),
+		},
+		{
+			name:      "a = b",
+			a:         *resource.NewQuantity(20, resource.DecimalSI),
+			b:         *resource.NewQuantity(20, resource.DecimalSI),
+			expectedQ: *resource.NewQuantity(20, resource.DecimalSI),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expectedQ, MinQuant(tt.a, tt.b))
 		})
 	}
 }

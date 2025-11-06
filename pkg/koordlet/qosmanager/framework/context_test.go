@@ -32,46 +32,11 @@ import (
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/qosmanager/helpers"
+	qosmanagerUtil "github.com/koordinator-sh/koordinator/pkg/koordlet/qosmanager/plugins/util"
 	mock_statesinformer "github.com/koordinator-sh/koordinator/pkg/koordlet/statesinformer/mockstatesinformer"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/util/testutil"
 	"github.com/koordinator-sh/koordinator/pkg/util"
 )
-
-func Test_EvictPodsIfNotEvicted(t *testing.T) {
-	// test data
-	pod := testutil.MockTestPod(apiext.QoSBE, "test_be_pod")
-	node := testutil.MockTestNode("80", "120G")
-	// env
-	ctl := gomock.NewController(t)
-	defer ctl.Finish()
-
-	fakeRecorder := &testutil.FakeRecorder{}
-	client := clientsetfake.NewSimpleClientset()
-	r := NewEvictor(client, fakeRecorder, policyv1beta1.SchemeGroupVersion.Version)
-	stop := make(chan struct{})
-	err := r.podsEvicted.Run(stop)
-	assert.NoError(t, err)
-	defer func() { stop <- struct{}{} }()
-
-	// create pod
-	_, err = client.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
-	assert.NoError(t, err)
-
-	// evict success
-	r.EvictPodsIfNotEvicted([]*corev1.Pod{pod}, node, "evict pod first", "")
-	getEvictObject, err := client.Tracker().Get(testutil.PodsResource, pod.Namespace, pod.Name)
-	assert.NoError(t, err)
-	assert.NotNil(t, getEvictObject, "evictPod Fail", err)
-	assert.Equal(t, helpers.EvictPodSuccess, fakeRecorder.EventReason, "expect evict success event! but got %s", fakeRecorder.EventReason)
-
-	_, found := r.podsEvicted.Get(string(pod.UID))
-	assert.True(t, found, "check PodEvicted cached")
-
-	// evict duplication
-	fakeRecorder.EventReason = ""
-	r.EvictPodsIfNotEvicted([]*corev1.Pod{pod}, node, "evict pod duplication", "")
-	assert.Equal(t, "", fakeRecorder.EventReason, "check evict duplication, no event send!")
-}
 
 func setupFakeDiscoveryWithPolicyResource(fake *coretesting.Fake, groupVersion string) {
 	fake.AddReactor("get", "group", func(action coretesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -124,7 +89,7 @@ func Test_evictPod_policy_v1beta1(t *testing.T) {
 	evictVersion, err := util.FindSupportedEvictVersion(client)
 	assert.Nil(t, err)
 
-	r := NewEvictor(client, fakeRecorder, evictVersion)
+	r := qosmanagerUtil.NewEvictor(client, fakeRecorder, evictVersion)
 
 	// create pod
 	_, err = client.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
@@ -134,7 +99,7 @@ func Test_evictPod_policy_v1beta1(t *testing.T) {
 	assert.NotNil(t, existPod, "pod exist in k8s!", err)
 
 	// evict success
-	r.evictPod(pod, "evict pod first", "")
+	r.EvictPodIfNotEvicted(pod, "evict pod first", "")
 	getEvictObject, err := client.Tracker().Get(testutil.PodsResource, pod.Namespace, pod.Name)
 	assert.NoError(t, err)
 	assert.NotNil(t, getEvictObject, "evictPod Fail", err)
@@ -160,7 +125,7 @@ func Test_evictPod_policy_v1(t *testing.T) {
 	evictVersion, err := util.FindSupportedEvictVersion(client)
 	assert.Nil(t, err)
 
-	r := NewEvictor(client, fakeRecorder, evictVersion)
+	r := qosmanagerUtil.NewEvictor(client, fakeRecorder, evictVersion)
 
 	// create pod
 	_, err = client.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
@@ -170,7 +135,7 @@ func Test_evictPod_policy_v1(t *testing.T) {
 	assert.NotNil(t, existPod, "pod exist in k8s!", err)
 
 	// evict success
-	r.evictPod(pod, "evict pod first", "")
+	r.EvictPodIfNotEvicted(pod, "evict pod first", "")
 	getEvictObject, err := client.Tracker().Get(testutil.PodsResource, pod.Namespace, pod.Name)
 	assert.NoError(t, err)
 	assert.NotNil(t, getEvictObject, "evictPod Fail", err)
@@ -193,7 +158,7 @@ func Test_evictPod_policy_none(t *testing.T) {
 	fakeRecorder := &testutil.FakeRecorder{}
 	client := clientsetfake.NewSimpleClientset()
 
-	r := NewEvictor(client, fakeRecorder, "")
+	r := qosmanagerUtil.NewEvictor(client, fakeRecorder, "")
 
 	// create pod
 	_, err := client.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
@@ -203,6 +168,6 @@ func Test_evictPod_policy_none(t *testing.T) {
 	assert.NotNil(t, existPod, "pod exist in k8s!", err)
 
 	// evict success
-	evicted := r.evictPod(pod, "evict pod first", "")
+	evicted := r.EvictPodIfNotEvicted(pod, "evict pod first", "")
 	assert.False(t, evicted, "pod evicted", err)
 }

@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	quotav1 "k8s.io/apiserver/pkg/quota/v1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
@@ -36,48 +37,86 @@ var _ DeviceHandler = &GPUHandler{}
 type GPUHandler struct {
 }
 
-func (h *GPUHandler) CalcDesiredRequestsAndCount(podRequests corev1.ResourceList, totalDevices deviceResources, hint *apiext.DeviceHint) (corev1.ResourceList, int, error) {
-	if err := fillGPUTotalMem(totalDevices, podRequests); err != nil {
-		return nil, 0, err
+func (h *GPUHandler) CalcDesiredRequestsAndCount(node *corev1.Node, pod *corev1.Pod, podRequests corev1.ResourceList, nodeDevice *nodeDevice, hint *apiext.DeviceHint, state *preFilterState) (corev1.ResourceList, int, *framework.Status) {
+	totalDevice := nodeDevice.deviceTotal[schedulingv1alpha1.GPU]
+	if len(totalDevice) == 0 {
+		return nil, 0, framework.NewStatus(framework.UnschedulableAndUnresolvable, fmt.Sprintf("Insufficient %s devices", schedulingv1alpha1.GPU))
 	}
-
-	requests := podRequests
-	desiredCount := int64(1)
-
-	memoryRatio := podRequests[apiext.ResourceGPUMemoryRatio]
-	multiDevices := memoryRatio.Value() > 100 && memoryRatio.Value()%100 == 0
-	if multiDevices {
-		gpuCore, gpuMem, gpuMemoryRatio := podRequests[apiext.ResourceGPUCore], podRequests[apiext.ResourceGPUMemory], podRequests[apiext.ResourceGPUMemoryRatio]
-		desiredCount = gpuMemoryRatio.Value() / 100
-		requests = corev1.ResourceList{
-			apiext.ResourceGPUCore:        *resource.NewQuantity(gpuCore.Value()/desiredCount, resource.DecimalSI),
-			apiext.ResourceGPUMemory:      *resource.NewQuantity(gpuMem.Value()/desiredCount, resource.BinarySI),
-			apiext.ResourceGPUMemoryRatio: *resource.NewQuantity(gpuMemoryRatio.Value()/desiredCount, resource.DecimalSI),
-		}
+	if state == nil || state.gpuRequirements == nil {
+		// just for test
+		requestsPerGPU, numberOfGPUs, _ := calcDesiredRequestsAndCountForGPU(podRequests)
+		return requestsPerGPU, numberOfGPUs, nil
 	}
-	return requests, int(desiredCount), nil
+	return state.gpuRequirements.requestsPerGPU, state.gpuRequirements.numberOfGPUs, nil
 }
 
-func fillGPUTotalMem(nodeDeviceTotal deviceResources, podRequest corev1.ResourceList) error {
-	// nodeDeviceTotal uses the minor of GPU as key. However, under certain circumstances,
-	// minor 0 might not exist. We need to iterate the cache once to find the active minor.
-	var total corev1.ResourceList
-	for _, resources := range nodeDeviceTotal {
-		if len(resources) > 0 && !quotav1.IsZero(resources) {
-			total = resources
-			break
+func calcDesiredRequestsAndCountForGPU(podRequests corev1.ResourceList) (corev1.ResourceList, int, bool) {
+	desiredCount := int64(1)
+	isShared := false
+
+	gpuShare, ok := podRequests[apiext.ResourceGPUShared]
+	gpuCore, coreExists := podRequests[apiext.ResourceGPUCore]
+	huaweiNPUCore, huaweiNPUCoreExists := podRequests[apiext.ResourceHuaweiNPUCore]
+	huaweiNPUCPU, huaweiNPUCPUExists := podRequests[apiext.ResourceHuaweiNPUCPU]
+	huaweiNPUDVPP, huaweiNPUDVPPExists := podRequests[apiext.ResourceHuaweiNPUDVPP]
+	gpuMemoryRatio, memoryRatioExists := podRequests[apiext.ResourceGPUMemoryRatio]
+	// gpu share mode
+	if ok && gpuShare.Value() > 0 {
+		desiredCount = gpuShare.Value()
+	} else {
+		if memoryRatioExists && gpuMemoryRatio.Value() > 100 && gpuMemoryRatio.Value()%100 == 0 {
+			desiredCount = gpuMemoryRatio.Value() / 100
 		}
 	}
-	if total == nil {
-		return fmt.Errorf("no healthy GPU Devices")
+
+	requests := corev1.ResourceList{}
+	if coreExists {
+		requests[apiext.ResourceGPUCore] = *resource.NewQuantity(gpuCore.Value()/desiredCount, resource.DecimalSI)
+	}
+	if huaweiNPUCoreExists {
+		requests[apiext.ResourceHuaweiNPUCore] = *resource.NewQuantity(huaweiNPUCore.Value()/desiredCount, resource.DecimalSI)
+	}
+	if huaweiNPUCPUExists {
+		requests[apiext.ResourceHuaweiNPUCPU] = *resource.NewQuantity(huaweiNPUCPU.Value()/desiredCount, resource.DecimalSI)
+	}
+	if huaweiNPUDVPPExists {
+		requests[apiext.ResourceHuaweiNPUDVPP] = *resource.NewQuantity(huaweiNPUDVPP.Value()/desiredCount, resource.DecimalSI)
+	}
+	if memoryRatioExists {
+		gpuMemoryRatioPerGPU := gpuMemoryRatio.Value() / desiredCount
+		if gpuMemoryRatioPerGPU < 100 {
+			isShared = true
+		}
+		requests[apiext.ResourceGPUMemoryRatio] = *resource.NewQuantity(gpuMemoryRatioPerGPU, resource.DecimalSI)
+	} else if gpuMem, memExists := podRequests[apiext.ResourceGPUMemory]; memExists {
+		isShared = true
+		requests[apiext.ResourceGPUMemory] = *resource.NewQuantity(gpuMem.Value()/desiredCount, resource.BinarySI)
+	}
+	return requests, int(desiredCount), isShared
+}
+
+func fillGPUTotalMem(allocations apiext.DeviceAllocations, nodeDeviceInfo *nodeDevice) error {
+	gpuAllocations, ok := allocations[schedulingv1alpha1.GPU]
+	if !ok {
+		return nil
+	}
+	gpuTotalDevices, ok := nodeDeviceInfo.deviceTotal[schedulingv1alpha1.GPU]
+	if !ok {
+		return nil
 	}
 
-	// a node can only contain one type of GPU, so each of them has the same total memory.
-	if gpuMem, ok := podRequest[apiext.ResourceGPUMemory]; ok {
-		podRequest[apiext.ResourceGPUMemoryRatio] = memoryBytesToRatio(gpuMem, total[apiext.ResourceGPUMemory])
-	} else {
-		gpuMemRatio := podRequest[apiext.ResourceGPUMemoryRatio]
-		podRequest[apiext.ResourceGPUMemory] = memoryRatioToBytes(gpuMemRatio, total[apiext.ResourceGPUMemory])
+	for i, allocation := range gpuAllocations {
+		gpuDevice, ok := gpuTotalDevices[int(allocation.Minor)]
+		if !ok || gpuDevice == nil || quotav1.IsZero(gpuDevice) {
+			return fmt.Errorf("no healthy gpu device with minor %d of allocation", allocation.Minor)
+		}
+		gpuAllocations[i].Resources = gpuAllocations[i].Resources.DeepCopy()
+		if gpuMem, ok := allocation.Resources[apiext.ResourceGPUMemory]; ok {
+			gpuAllocations[i].Resources[apiext.ResourceGPUMemoryRatio] = memoryBytesToRatio(gpuMem, gpuDevice[apiext.ResourceGPUMemory])
+		} else {
+			gpuMemRatio := allocation.Resources[apiext.ResourceGPUMemoryRatio]
+			gpuAllocations[i].Resources[apiext.ResourceGPUMemory] = memoryRatioToBytes(gpuMemRatio, gpuDevice[apiext.ResourceGPUMemory])
+		}
 	}
 	return nil
 }

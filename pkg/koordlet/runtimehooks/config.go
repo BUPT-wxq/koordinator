@@ -18,6 +18,7 @@ package runtimehooks
 
 import (
 	"flag"
+	"math"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -26,10 +27,15 @@ import (
 
 	"github.com/koordinator-sh/koordinator/pkg/features"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/batchresource"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/coresched"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/cpunormalization"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/cpuset"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/gpu"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/groupidentity"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/rdma"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/resctrl"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/tc"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/hooks/terwayqos"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/util/system"
 )
 
@@ -55,6 +61,12 @@ const (
 	// beta: v1.1
 	GPUEnvInject featuregate.Feature = "GPUEnvInject"
 
+	// RDMADeviceInject injects rdma device info according to allocate result from koord-scheduler.
+	//
+	// owner: @ZiMengSheng
+	// alpha: v1.6
+	RDMADeviceInject featuregate.Feature = "RDMADeviceInject"
+
 	// BatchResource sets request and limits of cpu and memory on cgroup file according batch resources.
 	//
 	// owner: @saintube @zwzhang0107
@@ -66,6 +78,29 @@ const (
 	// owner: @saintube @zwzhang0107
 	// alpha: v1.4
 	CPUNormalization featuregate.Feature = "CPUNormalization"
+
+	// CoreSched manages Linux Core Scheduling cookies for containers who enable the core sched.
+	// NOTE: CoreSched is an alternative policy of the CPU QoS, and it is exclusive to the Group Identity feature.
+	//
+	// owner: @saintube @zwzhang0107
+	// alpha: v1.4
+	CoreSched featuregate.Feature = "CoreSched"
+
+	// TerwayQoS enables net QoS feature of koordlet.
+	// owner: @l1b0k
+	// alpha: v1.5
+	TerwayQoS featuregate.Feature = "TerwayQoS"
+
+	// TCNetworkQoS indicates a network qos implementation based on tc.
+	// owner: @lucming
+	// alpha: v1.5
+	TCNetworkQoS featuregate.Feature = "TCNetworkQoS"
+
+	// Resctrl adjusts LLC/MB value for pod.
+	//
+	// owner: @kangclzjc @saintube @zwzhang0107
+	// alpha: v1.5
+	Resctrl featuregate.Feature = "Resctrl"
 )
 
 var (
@@ -73,16 +108,26 @@ var (
 		GroupIdentity:    {Default: true, PreRelease: featuregate.Beta},
 		CPUSetAllocator:  {Default: true, PreRelease: featuregate.Beta},
 		GPUEnvInject:     {Default: false, PreRelease: featuregate.Alpha},
+		RDMADeviceInject: {Default: false, PreRelease: featuregate.Alpha},
 		BatchResource:    {Default: true, PreRelease: featuregate.Beta},
 		CPUNormalization: {Default: false, PreRelease: featuregate.Alpha},
+		CoreSched:        {Default: false, PreRelease: featuregate.Alpha},
+		TerwayQoS:        {Default: false, PreRelease: featuregate.Alpha},
+		TCNetworkQoS:     {Default: false, PreRelease: featuregate.Alpha},
+		Resctrl:          {Default: false, PreRelease: featuregate.Alpha},
 	}
 
 	runtimeHookPlugins = map[featuregate.Feature]HookPlugin{
 		GroupIdentity:    groupidentity.Object(),
 		CPUSetAllocator:  cpuset.Object(),
 		GPUEnvInject:     gpu.Object(),
+		RDMADeviceInject: rdma.Object(),
 		BatchResource:    batchresource.Object(),
 		CPUNormalization: cpunormalization.Object(),
+		CoreSched:        coresched.Object(),
+		TerwayQoS:        terwayqos.Object(),
+		TCNetworkQoS:     tc.Object(),
+		Resctrl:          resctrl.Object(),
 	}
 )
 
@@ -95,7 +140,14 @@ type Config struct {
 	RuntimeHookHostEndpoint         string
 	RuntimeHookDisableStages        []string
 	RuntimeHooksNRI                 bool
+	RuntimeHooksNRIConnectTimeout   time.Duration
+	RuntimeHooksNRIBackOffDuration  time.Duration
+	RuntimeHooksNRIBackOffCap       time.Duration
+	RuntimeHooksNRIBackOffFactor    float64
+	RuntimeHooksNRIBackOffSteps     int
 	RuntimeHooksNRISocketPath       string
+	RuntimeHooksNRIPluginName       string
+	RuntimeHooksNRIPluginIndex      string
 	RuntimeHookReconcileInterval    time.Duration
 }
 
@@ -109,7 +161,14 @@ func NewDefaultConfig() *Config {
 		RuntimeHookHostEndpoint:         "/var/run/koordlet/koordlet.sock",
 		RuntimeHookDisableStages:        []string{},
 		RuntimeHooksNRI:                 true,
+		RuntimeHooksNRIConnectTimeout:   6 * time.Second,
+		RuntimeHooksNRIBackOffDuration:  1 * time.Second,
+		RuntimeHooksNRIBackOffCap:       1<<62 - 1,
+		RuntimeHooksNRIBackOffSteps:     math.MaxInt32,
+		RuntimeHooksNRIBackOffFactor:    2,
 		RuntimeHooksNRISocketPath:       "nri/nri.sock",
+		RuntimeHooksNRIPluginName:       "koordlet_nri",
+		RuntimeHooksNRIPluginIndex:      "00",
 		RuntimeHookReconcileInterval:    10 * time.Second,
 	}
 }
@@ -121,6 +180,14 @@ func (c *Config) InitFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.RuntimeHooksPluginFailurePolicy, "runtime-hooks-plugin-failure-policy", c.RuntimeHooksPluginFailurePolicy, "stop running other hooks once someone failed")
 	fs.StringVar(&c.RuntimeHookConfigFilePath, "runtime-hooks-config-path", c.RuntimeHookConfigFilePath, "config file path for runtime hooks")
 	fs.StringVar(&c.RuntimeHookHostEndpoint, "runtime-hooks-host-endpoint", c.RuntimeHookHostEndpoint, "host endpoint of runtime proxy")
+	fs.DurationVar(&c.RuntimeHooksNRIConnectTimeout, "runtime-hooks-nri-connect-timeout", c.RuntimeHooksNRIConnectTimeout, "nri server connect time out, it should be a little more than default plugin registration timeout(5 seconds) which is defined in containerd config")
+	fs.DurationVar(&c.RuntimeHooksNRIBackOffDuration, "runtime-hooks-nri-backoff-duration", c.RuntimeHooksNRIBackOffDuration, "nri server backoff duration")
+	fs.DurationVar(&c.RuntimeHooksNRIBackOffCap, "runtime-hooks-nri-backoff-cap", c.RuntimeHooksNRIBackOffCap, "nri server backoff cap")
+	fs.IntVar(&c.RuntimeHooksNRIBackOffSteps, "runtime-hooks-nri-backoff-steps", c.RuntimeHooksNRIBackOffSteps, "nri server backoff steps")
+	fs.Float64Var(&c.RuntimeHooksNRIBackOffFactor, "runtime-hooks-nri-backoff-factor", c.RuntimeHooksNRIBackOffFactor, "nri server reconnect backoff factor")
+	fs.StringVar(&c.RuntimeHooksNRISocketPath, "runtime-hooks-nri-socket-path", c.RuntimeHooksNRISocketPath, "nri server socket path")
+	fs.StringVar(&c.RuntimeHooksNRIPluginName, "runtime-hooks-nri-plugin-name", c.RuntimeHooksNRIPluginName, "nri plugin name of the koordlet runtime hooks")
+	fs.StringVar(&c.RuntimeHooksNRIPluginIndex, "runtime-hooks-nri-plugin-index", c.RuntimeHooksNRIPluginIndex, "nri plugin index of the koordlet runtime hooks")
 	fs.Var(cliflag.NewStringSlice(&c.RuntimeHookDisableStages), "runtime-hooks-disable-stages", "disable stages for runtime hooks")
 	fs.BoolVar(&c.RuntimeHooksNRI, "enable-nri-runtime-hook", c.RuntimeHooksNRI, "enable/disable runtime hooks nri mode")
 	fs.DurationVar(&c.RuntimeHookReconcileInterval, "runtime-hooks-reconcile-interval", c.RuntimeHookReconcileInterval, "reconcile interval for each plugins")

@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package validating
 
 import (
@@ -31,10 +32,8 @@ import (
 func makeTestHandler() *ConfigMapValidatingHandler {
 	client := fake.NewClientBuilder().Build()
 	sche := client.Scheme()
-	decoder, _ := admission.NewDecoder(sche)
-	handler := NewConfigMapValidatingHandler()
-	handler.InjectClient(client)
-	handler.InjectDecoder(decoder)
+	decoder := admission.NewDecoder(sche)
+	handler := NewConfigMapValidatingHandler(client, decoder)
 
 	return handler
 }

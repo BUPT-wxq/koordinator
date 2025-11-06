@@ -27,8 +27,11 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/collectors/performance"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/collectors/podresource"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/collectors/podthrottled"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/collectors/resctrl"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/collectors/sysresource"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/devices/gpu"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/devices/rdma"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/devices/xpu"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor/framework"
 )
 
@@ -36,7 +39,9 @@ import (
 
 var (
 	devicePlugins = map[string]framework.DeviceFactory{
-		gpu.DeviceCollectorName: gpu.New,
+		gpu.DeviceCollectorName:  gpu.New,
+		rdma.DeviceCollectorName: rdma.New,
+		xpu.DeviceCollectorName:  xpu.New,
 	}
 
 	collectorPlugins = map[string]framework.CollectorFactory{
@@ -51,6 +56,7 @@ var (
 		coldmemoryresource.CollectorName: coldmemoryresource.New,
 		pagecache.CollectorName:          pagecache.New,
 		hostapplication.CollectorName:    hostapplication.New,
+		resctrl.CollectorName:            resctrl.New,
 	}
 
 	podFilters = map[string]framework.PodFilter{

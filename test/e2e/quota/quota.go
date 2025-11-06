@@ -21,19 +21,20 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	schedclientset "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned"
+
+	schedclientset "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/clientset/versioned"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
+	schedv1alpha1 "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/util"
 	"github.com/koordinator-sh/koordinator/test/e2e/framework"
 	e2enode "github.com/koordinator-sh/koordinator/test/e2e/framework/node"
 	e2epod "github.com/koordinator-sh/koordinator/test/e2e/framework/pod"
-	schedv1alpha1 "sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 )
 
 var _ = SIGDescribe("basic-quota", func() {

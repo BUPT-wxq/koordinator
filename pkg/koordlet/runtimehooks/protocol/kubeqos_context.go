@@ -18,6 +18,7 @@ package protocol
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/audit"
@@ -44,6 +45,10 @@ type KubeQOSContext struct {
 	Response KubeQOSResponse
 	executor resourceexecutor.ResourceUpdateExecutor
 	updaters []resourceexecutor.ResourceUpdater
+}
+
+func (k *KubeQOSContext) RecordEvent(r record.EventRecorder, pod *corev1.Pod) {
+	//TODO: Don't record pods by QoS
 }
 
 func (k *KubeQOSContext) FromReconciler(kubeQOS corev1.PodQOSClass) {
@@ -89,6 +94,19 @@ func (k *KubeQOSContext) injectForExt() {
 			k.updaters = append(k.updaters, updater)
 			klog.V(5).Infof("set kubeqos %v bvt %v on cgroup parent %v", k.Request.KubeQOSClass,
 				*k.Response.Resources.CPUBvt, k.Request.CgroupParent)
+		}
+	}
+	if k.Response.Resources.CPUIdle != nil {
+		eventHelper := audit.V(3).Group(string(k.Request.KubeQOSClass)).Reason("runtime-hooks").Message(
+			"set kubeqos idle to %v", *k.Response.Resources.CPUIdle)
+		updater, err := injectCPUIdle(k.Request.CgroupParent, *k.Response.Resources.CPUIdle, eventHelper, k.executor)
+		if err != nil {
+			klog.Infof("set kubeqos %v idle %v on cgroup parent %v failed, error %v", k.Request.KubeQOSClass,
+				*k.Response.Resources.CPUIdle, k.Request.CgroupParent, err)
+		} else {
+			k.updaters = append(k.updaters, updater)
+			klog.V(5).Infof("set kubeqos %v idle %v on cgroup parent %v", k.Request.KubeQOSClass,
+				*k.Response.Resources.CPUIdle, k.Request.CgroupParent)
 		}
 	}
 }

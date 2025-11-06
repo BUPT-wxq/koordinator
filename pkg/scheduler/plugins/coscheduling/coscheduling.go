@@ -20,24 +20,25 @@ package coscheduling
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
-	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling"
-	pgclientset "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned"
-	pgformers "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions"
-	schedinformers "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
+	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
+	pgclientset "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/clientset/versioned"
+	pgformers "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions"
+	schedinformers "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config/validation"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/core"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
+	reservationutil "github.com/koordinator-sh/koordinator/pkg/util/reservation"
 )
 
 // Coscheduling is a plugin that schedules pods in a group.
@@ -49,17 +50,24 @@ type Coscheduling struct {
 	pgMgr            core.Manager
 }
 
-var _ framework.QueueSortPlugin = &Coscheduling{}
+var _ framework.PreEnqueuePlugin = &Coscheduling{}
+var _ frameworkext.NextPodPlugin = &Coscheduling{}
+var _ frameworkext.PreFilterTransformer = &Coscheduling{}
 var _ framework.PreFilterPlugin = &Coscheduling{}
+var _ frameworkext.FindOneNodePluginProvider = &Coscheduling{}
+var _ frameworkext.FindOneNodePlugin = &Coscheduling{}
+var _ frameworkext.PostFilterTransformer = &Coscheduling{}
 var _ framework.PostFilterPlugin = &Coscheduling{}
 var _ framework.PermitPlugin = &Coscheduling{}
 var _ framework.ReservePlugin = &Coscheduling{}
+var _ framework.PreBindPlugin = &Coscheduling{}
+var _ frameworkext.ReservationPreBindPlugin = &Coscheduling{}
 var _ framework.PostBindPlugin = &Coscheduling{}
 var _ framework.EnqueueExtensions = &Coscheduling{}
 
 const (
 	// Name is the name of the plugin used in Registry and configurations.
-	Name = "Coscheduling"
+	Name = core.Name
 )
 
 // New initializes and returns a new Coscheduling plugin.
@@ -84,7 +92,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	informerFactory := handle.SharedInformerFactory()
 	extendedHandle := handle.(frameworkext.ExtendedHandle)
 	koordInformerFactory := extendedHandle.KoordinatorSharedInformerFactory()
-	pgMgr := core.NewPodGroupManager(args, pgClient, pgInformerFactory, informerFactory, koordInformerFactory)
+	pgMgr := core.NewPodGroupManager(handle, args, pgClient, pgInformerFactory, informerFactory, koordInformerFactory)
 	plugin := &Coscheduling{
 		args:             args,
 		frameworkHandler: handle,
@@ -95,14 +103,9 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	return plugin, nil
 }
 
-func (cs *Coscheduling) EventsToRegister() []framework.ClusterEvent {
-	// To register a custom event, follow the naming convention at:
-	// https://git.k8s.io/kubernetes/pkg/scheduler/eventhandlers.go#L403-L410
-	pgGVK := fmt.Sprintf("podgroups.v1alpha1.%v", scheduling.GroupName)
-	return []framework.ClusterEvent{
-		{Resource: framework.Pod, ActionType: framework.Add},
-		{Resource: framework.GVK(pgGVK), ActionType: framework.Add | framework.Update},
-	}
+func (cs *Coscheduling) EventsToRegister() []framework.ClusterEventWithHint {
+	// indicates that we are not interested in any events
+	return nil
 }
 
 // Name returns name of the plugin. It is used in logs, etc.
@@ -110,76 +113,61 @@ func (cs *Coscheduling) Name() string {
 	return Name
 }
 
-// Less is sorting pods in the scheduling queue in the following order.
-// Firstly, compare the priorities of the two pods, the higher priority (if pod's priority is equal,then compare their KoordinatorPriority at labels )is at the front of the queue,
-// Secondly, compare Gang group ID of the two pods, pods that NOT belong to a Gang will have higher priority than pods that belongs to a Gang,
-// Thirdly, compare the creationTimestamp of two pods, if pod belongs to a Gang, then we compare creationTimestamp of the Gang, the one created first will be at the front of the queue
-// Finally, compare pod's namespaced name.
-func (cs *Coscheduling) Less(podInfo1, podInfo2 *framework.QueuedPodInfo) bool {
-	prio1 := corev1helpers.PodPriority(podInfo1.Pod)
-	prio2 := corev1helpers.PodPriority(podInfo2.Pod)
-	if prio1 != prio2 {
-		return prio1 > prio2
-	}
-	subPrio1, err := extension.GetPodSubPriority(podInfo1.Pod.Labels)
-	if err != nil {
-		klog.ErrorS(err, "GetSubPriority of the pod error", "pod", klog.KObj(podInfo1.Pod))
-	}
-	subPrio2, err := extension.GetPodSubPriority(podInfo2.Pod.Labels)
-	if err != nil {
-		klog.ErrorS(err, "GetSubPriority of the pod error", "pod", klog.KObj(podInfo2.Pod))
-	}
-	if subPrio1 != subPrio2 {
-		return subPrio1 > subPrio2
-	}
-
-	group1, _ := cs.pgMgr.GetGroupId(podInfo1.Pod)
-	group2, _ := cs.pgMgr.GetGroupId(podInfo2.Pod)
-	if group1 != group2 {
-		return group1 < group2
-	}
-
-	isgang1satisfied := cs.pgMgr.IsGangMinSatisfied(podInfo1.Pod)
-	isgang2satisfied := cs.pgMgr.IsGangMinSatisfied(podInfo2.Pod)
-	if isgang1satisfied != isgang2satisfied {
-		return !isgang1satisfied
-	}
-
-	childScheduleCycle1 := cs.pgMgr.GetChildScheduleCycle(podInfo1.Pod)
-	childScheduleCycle2 := cs.pgMgr.GetChildScheduleCycle(podInfo2.Pod)
-	if childScheduleCycle1 != childScheduleCycle2 {
-		return childScheduleCycle1 < childScheduleCycle2
-	}
-
-	creationTime1 := cs.pgMgr.GetCreatTime(podInfo1)
-	creationTime2 := cs.pgMgr.GetCreatTime(podInfo2)
-	if creationTime1.Equal(creationTime2) {
-		return util.GetId(podInfo1.Pod.Namespace, podInfo1.Pod.Name) < util.GetId(podInfo2.Pod.Namespace, podInfo2.Pod.Name)
-	}
-	return creationTime1.Before(creationTime2)
-}
-
-// PreFilter
-// if non-strict-mode, we only do step1 and step2:
+// PreEnqueue
 // i.Check whether childes in Gang has met the requirements of minimum number under each Gang, and reject the pod if negative.
 // ii.Check whether the Gang has been timeout(check the pod's annotation,later introduced at Permit section) or is inited, and reject the pod if positive.
-// iii.Check whether the Gang has met the scheduleCycleValid check, and reject the pod if negative.
-// iv.Try update scheduleCycle, scheduleCycleValid, childrenScheduleRoundMap as mentioned above.
-func (cs *Coscheduling) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
-	// If PreFilter fails, return framework.Error to avoid
-	// any preemption attempts.
-	if err := cs.pgMgr.PreFilter(ctx, pod); err != nil {
-		klog.ErrorS(err, "PreFilter failed", "pod", klog.KObj(pod))
-		return nil, framework.AsStatus(err)
+func (cs *Coscheduling) PreEnqueue(ctx context.Context, pod *v1.Pod) *framework.Status {
+	if err := cs.pgMgr.PreEnqueue(ctx, pod); err != nil {
+		klog.ErrorS(err, "PreEnqueue failed", "pod", klog.KObj(pod))
+		return framework.NewStatus(framework.UnschedulableAndUnresolvable, err.Error())
 	}
-	return nil, framework.NewStatus(framework.Success, "")
+	return framework.NewStatus(framework.Success, "")
+}
+
+func (cs *Coscheduling) NextPod() *v1.Pod {
+	return cs.pgMgr.NextPod()
+}
+
+func (cs *Coscheduling) FindOneNodePlugin() frameworkext.FindOneNodePlugin {
+	if cs.args != nil && *cs.args.AwareNetworkTopology {
+		return cs
+	}
+	return nil
+}
+
+func (cs *Coscheduling) FindOneNode(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, result *framework.PreFilterResult) (string, *framework.Status) {
+	return cs.pgMgr.FindOneNode(ctx, cycleState, pod, result)
+}
+
+// BeforePreFilter
+// i.Check whether the Gang has met the scheduleCycleValid check, and reject the pod if negative.
+// ii.Try update scheduleCycle, scheduleCycleValid, childrenScheduleRoundMap as mentioned above.
+func (cs *Coscheduling) BeforePreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*v1.Pod, bool, *framework.Status) {
+	// If PreFilter fails, return framework.UnschedulableAndUnresolvable to avoid any preemption attempts.
+	if err := cs.pgMgr.BeforePreFilter(ctx, state, pod); err != nil {
+		klog.ErrorS(err, "PreFilter failed", "pod", klog.KObj(pod))
+		return nil, false, framework.NewStatus(framework.UnschedulableAndUnresolvable, err.Error())
+	}
+	return nil, false, framework.NewStatus(framework.Success, "")
+}
+
+func (cs *Coscheduling) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
+	return cs.pgMgr.PreFilter(ctx, state, pod)
+}
+
+func (cs *Coscheduling) AfterPreFilter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, preFilterResult *framework.PreFilterResult) *framework.Status {
+	return nil
+}
+
+func (cs *Coscheduling) AfterPostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, filteredNodeStatusMap framework.NodeToStatusMap) {
+	cs.pgMgr.AfterPostFilter(ctx, state, pod, cs.frameworkHandler, Name, filteredNodeStatusMap)
 }
 
 // PostFilter
 // i. If strict-mode, we will set scheduleCycleValid to false and release all assumed pods.
 // ii. If non-strict mode, we will do nothing.
 func (cs *Coscheduling) PostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, filteredNodeStatusMap framework.NodeToStatusMap) (*framework.PostFilterResult, *framework.Status) {
-	return cs.pgMgr.PostFilter(ctx, pod, cs.frameworkHandler, Name, filteredNodeStatusMap)
+	return cs.pgMgr.PostFilter(ctx, state, pod, filteredNodeStatusMap)
 }
 
 // PreFilterExtensions returns a PreFilterExtensions interface if the plugin implements one.
@@ -202,10 +190,9 @@ func (cs *Coscheduling) Permit(ctx context.Context, state *framework.CycleState,
 		klog.InfoS("Pod is waiting to be scheduled at Permit stage", "gang",
 			util.GetId(pod.Namespace, util.GetGangNameByPod(pod)), "pod", klog.KObj(pod))
 		retStatus = framework.NewStatus(framework.Wait)
-		// We will also request to move the sibling pods back to activeQ.
-		cs.pgMgr.ActivateSiblings(pod, state)
 	case core.Success:
 		cs.pgMgr.AllowGangGroup(pod, cs.frameworkHandler, Name)
+		cs.pgMgr.SucceedGangScheduling()
 		retStatus = framework.NewStatus(framework.Success)
 		waitTime = 0
 	}
@@ -222,6 +209,33 @@ func (cs *Coscheduling) Reserve(ctx context.Context, state *framework.CycleState
 // ii. do nothing when bound failed
 func (cs *Coscheduling) Unreserve(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) {
 	cs.pgMgr.Unreserve(ctx, state, pod, nodeName, cs.frameworkHandler, Name)
+}
+
+func (cs *Coscheduling) PreBind(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
+	gangInfo := cs.pgMgr.GetGangBindingInfo(pod)
+	if gangInfo == nil {
+		return nil
+	}
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[extension.LabelBindGangGroupId] = gangInfo.GangGroupId
+	pod.Labels[extension.LabelBindGangMemberCount] = strconv.FormatInt(int64(gangInfo.MemberCount), 10)
+	return nil
+}
+
+func (cs *Coscheduling) PreBindReservation(ctx context.Context, cycleState *framework.CycleState, r *schedulingv1alpha1.Reservation, nodeName string) *framework.Status {
+	pod := reservationutil.NewReservePod(r)
+	gangInfo := cs.pgMgr.GetGangBindingInfo(pod)
+	if gangInfo == nil {
+		return nil
+	}
+	if r.Labels == nil {
+		r.Labels = make(map[string]string)
+	}
+	r.Labels[extension.LabelBindGangGroupId] = gangInfo.GangGroupId
+	r.Labels[extension.LabelBindGangMemberCount] = strconv.FormatInt(int64(gangInfo.MemberCount), 10)
+	return nil
 }
 
 // PostBind is called after a pod is successfully bound. These plugins are used update PodGroup when pod is bound.

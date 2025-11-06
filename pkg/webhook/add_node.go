@@ -19,12 +19,17 @@ package webhook
 import (
 	"github.com/koordinator-sh/koordinator/pkg/features"
 	utilfeature "github.com/koordinator-sh/koordinator/pkg/util/feature"
+	"github.com/koordinator-sh/koordinator/pkg/webhook/node/mutating"
 	"github.com/koordinator-sh/koordinator/pkg/webhook/node/validating"
 )
 
 func init() {
 
-	addHandlersWithGate(validating.HandlerMap, func() (enabled bool) {
+	addHandlersWithGate(validating.HandlerBuilderMap, func() (enabled bool) {
 		return utilfeature.DefaultFeatureGate.Enabled(features.NodeValidatingWebhook)
+	})
+
+	addHandlersWithGate(mutating.HandlerBuilderMap, func() (enabled bool) {
+		return utilfeature.DefaultFeatureGate.Enabled(features.NodeMutatingWebhook)
 	})
 }

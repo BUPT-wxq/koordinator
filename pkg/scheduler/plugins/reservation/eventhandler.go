@@ -29,25 +29,29 @@ import (
 )
 
 type reservationEventHandler struct {
-	cache *reservationCache
+	cache       *reservationCache
+	rrNominator *nominator
 }
 
-func registerReservationEventHandler(cache *reservationCache, koordinatorInformerFactory koordinatorinformers.SharedInformerFactory) {
+func registerReservationEventHandler(cache *reservationCache, koordinatorInformerFactory koordinatorinformers.SharedInformerFactory,
+	rrNominator *nominator) {
 	eventHandler := &reservationEventHandler{
-		cache: cache,
+		cache:       cache,
+		rrNominator: rrNominator,
 	}
 	reservationInformer := koordinatorInformerFactory.Scheduling().V1alpha1().Reservations().Informer()
 	frameworkexthelper.ForceSyncFromInformer(context.TODO().Done(), koordinatorInformerFactory, reservationInformer, eventHandler)
 }
 
-func (h *reservationEventHandler) OnAdd(obj interface{}) {
+func (h *reservationEventHandler) OnAdd(obj interface{}, isInInitialList bool) {
 	r, ok := obj.(*schedulingv1alpha1.Reservation)
 	if !ok {
 		return
 	}
 	if reservationutil.IsReservationActive(r) {
 		h.cache.updateReservation(r)
-		klog.V(4).InfoS("add reservation into reservationCache", "reservation", klog.KObj(r))
+		klog.V(4).InfoS("add reservation into reservationCache",
+			"reservation", klog.KObj(r), "node", reservationutil.GetReservationNodeName(r))
 	}
 }
 
@@ -61,9 +65,20 @@ func (h *reservationEventHandler) OnUpdate(oldObj, newObj interface{}) {
 		return
 	}
 
-	if reservationutil.IsReservationActive(newR) || reservationutil.IsReservationFailed(newR) || reservationutil.IsReservationSucceeded(newR) {
+	if reservationutil.IsReservationActive(newR) {
 		h.cache.updateReservation(newR)
-		klog.V(4).InfoS("update reservation into reservationCache", "reservation", klog.KObj(newR))
+		h.rrNominator.DeleteReservePod(reservationutil.NewReservePod(newR))
+		klog.V(4).InfoS("update reservation into reservationCache",
+			"reservation", klog.KObj(newR), "node", reservationutil.GetReservationNodeName(newR))
+	} else if reservationutil.IsReservationFailed(newR) || reservationutil.IsReservationSucceeded(newR) {
+		// Here it is only marked that ReservationInfo is unavailable,
+		// and the real deletion operation is executed in deleteReservationFromCache(pkg/scheduler/frameworkext/eventhandlers/reservation_handler.go).
+		// This ensures that the Reserve Pod and the resources it holds are deleted correctly.
+		// NOTE: For the update event from available to terminated triggers the deleteReservationFromCache.
+		h.cache.updateReservationIfExists(newR)
+		klog.V(4).InfoS("update reservation into terminated so only update cache if exists",
+			"reservation", klog.KObj(newR), "node", reservationutil.GetReservationNodeName(newR))
+		h.rrNominator.DeleteReservePod(reservationutil.NewReservePod(newR))
 	}
 }
 
@@ -82,15 +97,18 @@ func (h *reservationEventHandler) OnDelete(obj interface{}) {
 		klog.V(4).InfoS("reservation cache delete failed to parse, obj %T", obj)
 		return
 	}
+	h.rrNominator.DeleteReservePod(reservationutil.NewReservePod(r))
 
 	// Here it is only marked that ReservationInfo is unavailable,
 	// and the real deletion operation is executed in deleteReservationFromCache(pkg/scheduler/frameworkext/eventhandlers/reservation_handler.go).
 	// This ensures that the Reserve Pod and the resources it holds are deleted correctly.
 	if reservationutil.IsReservationAvailable(r) {
-		klog.V(4).InfoS("Reservation has been deleted but it's still available, mark it as Failed", "reservation", klog.KObj(r))
+		klog.V(4).InfoS("Reservation has been deleted but it's still available, mark it as Failed",
+			"reservation", klog.KObj(r), "node", reservationutil.GetReservationNodeName(r))
 		r = r.DeepCopy()
 		r.Status.Phase = schedulingv1alpha1.ReservationFailed
 	}
 	h.cache.updateReservationIfExists(r)
-	klog.V(4).InfoS("got delete reservation event but just update it if exists", "reservation", klog.KObj(r))
+	klog.V(4).InfoS("got delete reservation event but just update it if exists",
+		"reservation", klog.KObj(r), "node", reservationutil.GetReservationNodeName(r))
 }

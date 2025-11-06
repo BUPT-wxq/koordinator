@@ -17,6 +17,8 @@ limitations under the License.
 package sloconfig
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 
@@ -76,8 +78,12 @@ func DefaultCPUQOS(qos apiext.QoSClass) *slov1alpha1.CPUQOS {
 	case apiext.QoSBE:
 		cpuQOS = &slov1alpha1.CPUQOS{
 			GroupIdentity: pointer.Int64(-1),
-			SchedIdle:     pointer.Int64(1),
-			CoreExpeller:  pointer.Bool(false),
+			// NOTE: Be careful to enable CPU Idle since it overrides and lock the cpu.shares/cpu.weight of the same
+			// cgroup to a minimal value. This can affect other components like Kubelet which wants to write
+			// cpu.shares/cpu.weight to other values.
+			// https://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git/commit/?id=304000390f88d049c85e9a0958ac5567f38816ee
+			SchedIdle:    pointer.Int64(0),
+			CoreExpeller: pointer.Bool(false),
 		}
 	case apiext.QoSSystem:
 		cpuQOS = &slov1alpha1.CPUQOS{
@@ -194,8 +200,10 @@ func DefaultMemoryQOS(qos apiext.QoSClass) *slov1alpha1.MemoryQOS {
 
 func DefaultResourceQOSPolicies() *slov1alpha1.ResourceQOSPolicies {
 	defaultCPUPolicy := slov1alpha1.CPUQOSPolicyGroupIdentity
+	defaultNetQoSPolicy := slov1alpha1.NETQOSPolicyTC
 	return &slov1alpha1.ResourceQOSPolicies{
-		CPUPolicy: &defaultCPUPolicy,
+		CPUPolicy:    &defaultCPUPolicy,
+		NETQOSPolicy: &defaultNetQoSPolicy,
 	}
 }
 
@@ -215,6 +223,14 @@ func DefaultResourceQOSStrategy() *slov1alpha1.ResourceQOSStrategy {
 				Enable:    pointer.Bool(false),
 				MemoryQOS: *DefaultMemoryQOS(apiext.QoSLSR),
 			},
+			BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+				Enable:   pointer.Bool(false),
+				BlkIOQOS: *NoneBlkIOQOS(),
+			},
+			NetworkQOS: &slov1alpha1.NetworkQOSCfg{
+				Enable:     pointer.Bool(false),
+				NetworkQOS: *NoneNetworkQOS(),
+			},
 		},
 		LSClass: &slov1alpha1.ResourceQOS{
 			CPUQOS: &slov1alpha1.CPUQOSCfg{
@@ -228,6 +244,14 @@ func DefaultResourceQOSStrategy() *slov1alpha1.ResourceQOSStrategy {
 			MemoryQOS: &slov1alpha1.MemoryQOSCfg{
 				Enable:    pointer.Bool(false),
 				MemoryQOS: *DefaultMemoryQOS(apiext.QoSLS),
+			},
+			BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+				Enable:   pointer.Bool(false),
+				BlkIOQOS: *NoneBlkIOQOS(),
+			},
+			NetworkQOS: &slov1alpha1.NetworkQOSCfg{
+				Enable:     pointer.Bool(false),
+				NetworkQOS: *NoneNetworkQOS(),
 			},
 		},
 		BEClass: &slov1alpha1.ResourceQOS{
@@ -243,6 +267,14 @@ func DefaultResourceQOSStrategy() *slov1alpha1.ResourceQOSStrategy {
 				Enable:    pointer.Bool(false),
 				MemoryQOS: *DefaultMemoryQOS(apiext.QoSBE),
 			},
+			BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+				Enable:   pointer.Bool(false),
+				BlkIOQOS: *NoneBlkIOQOS(),
+			},
+			NetworkQOS: &slov1alpha1.NetworkQOSCfg{
+				Enable:     pointer.Bool(false),
+				NetworkQOS: *NoneNetworkQOS(),
+			},
 		},
 		SystemClass: &slov1alpha1.ResourceQOS{
 			CPUQOS: &slov1alpha1.CPUQOSCfg{
@@ -257,11 +289,34 @@ func DefaultResourceQOSStrategy() *slov1alpha1.ResourceQOSStrategy {
 				Enable:    pointer.Bool(false),
 				MemoryQOS: *DefaultMemoryQOS(apiext.QoSSystem),
 			},
+			BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+				Enable:   pointer.Bool(false),
+				BlkIOQOS: *NoneBlkIOQOS(),
+			},
+			NetworkQOS: &slov1alpha1.NetworkQOSCfg{
+				Enable:     pointer.Bool(false),
+				NetworkQOS: *NoneNetworkQOS(),
+			},
+		},
+		CgroupRoot: &slov1alpha1.ResourceQOS{
+			BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+				Enable:   pointer.Bool(false),
+				BlkIOQOS: *NoneBlkIOQOS(),
+			},
 		},
 	}
 }
 
 func NoneResourceQOS(qos apiext.QoSClass) *slov1alpha1.ResourceQOS {
+	// cgroup root case: only used by blkio qos
+	if qos == apiext.QoSNone {
+		return &slov1alpha1.ResourceQOS{
+			BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+				Enable:   pointer.Bool(false),
+				BlkIOQOS: *NoneBlkIOQOS(),
+			},
+		}
+	}
 	return &slov1alpha1.ResourceQOS{
 		CPUQOS: &slov1alpha1.CPUQOSCfg{
 			Enable: pointer.Bool(false),
@@ -274,6 +329,14 @@ func NoneResourceQOS(qos apiext.QoSClass) *slov1alpha1.ResourceQOS {
 		MemoryQOS: &slov1alpha1.MemoryQOSCfg{
 			Enable:    pointer.Bool(false),
 			MemoryQOS: *NoneMemoryQOS(),
+		},
+		BlkIOQOS: &slov1alpha1.BlkIOQOSCfg{
+			Enable:   pointer.Bool(false),
+			BlkIOQOS: *NoneBlkIOQOS(),
+		},
+		NetworkQOS: &slov1alpha1.NetworkQOSCfg{
+			Enable:     pointer.Bool(false),
+			NetworkQOS: *NoneNetworkQOS(),
 		},
 	}
 }
@@ -309,10 +372,26 @@ func NoneMemoryQOS() *slov1alpha1.MemoryQOS {
 	}
 }
 
+func NoneBlkIOQOS() *slov1alpha1.BlkIOQOS {
+	return &slov1alpha1.BlkIOQOS{}
+}
+
+func NoneNetworkQOS() *slov1alpha1.NetworkQOS {
+	zero := intstr.FromInt32(0)
+	return &slov1alpha1.NetworkQOS{
+		IngressRequest: &zero,
+		IngressLimit:   &zero,
+		EgressRequest:  &zero,
+		EgressLimit:    &zero,
+	}
+}
+
 func NoneResourceQOSPolicies() *slov1alpha1.ResourceQOSPolicies {
 	noneCPUPolicy := slov1alpha1.CPUQOSPolicyGroupIdentity
+	defaultNetQoSPolicy := slov1alpha1.NETQOSPolicyTC
 	return &slov1alpha1.ResourceQOSPolicies{
-		CPUPolicy: &noneCPUPolicy,
+		CPUPolicy:    &noneCPUPolicy,
+		NETQOSPolicy: &defaultNetQoSPolicy,
 	}
 }
 
@@ -324,6 +403,7 @@ func NoneResourceQOSStrategy() *slov1alpha1.ResourceQOSStrategy {
 		LSClass:     NoneResourceQOS(apiext.QoSLS),
 		BEClass:     NoneResourceQOS(apiext.QoSBE),
 		SystemClass: NoneResourceQOS(apiext.QoSSystem),
+		CgroupRoot:  NoneResourceQOS(apiext.QoSNone),
 	}
 }
 
@@ -345,9 +425,7 @@ func DefaultCPUBurstConfig() slov1alpha1.CPUBurstConfig {
 
 func DefaultSystemStrategy() *slov1alpha1.SystemStrategy {
 	return &slov1alpha1.SystemStrategy{
-		MinFreeKbytesFactor:  pointer.Int64(100), // 1 means 1/10000
-		WatermarkScaleFactor: pointer.Int64(150), // 1 means 1/10000
-		MemcgReapBackGround:  pointer.Int64(0),
+		TotalNetworkBandwidth: resource.MustParse("0"),
 	}
 }
 

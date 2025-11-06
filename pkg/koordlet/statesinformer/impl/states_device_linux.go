@@ -18,8 +18,11 @@ package impl
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -28,10 +31,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/pointer"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metriccache"
 	koordletuti "github.com/koordinator-sh/koordinator/pkg/koordlet/util"
 	"github.com/koordinator-sh/koordinator/pkg/util"
 )
@@ -42,15 +48,41 @@ func (s *statesInformer) reportDevice() {
 		klog.Errorf("node is nil")
 		return
 	}
-	gpuDevices := s.buildGPUDevice()
-	if len(gpuDevices) == 0 {
-		return
-	}
-
-	gpuModel, gpuDriverVer := s.getGPUDriverAndModelFunc()
-
 	device := s.buildBasicDevice(node)
-	s.fillGPUDevice(device, gpuDevices, gpuModel, gpuDriverVer)
+	skipBuildGPU := false
+	func() {
+		xpuRawDevices := getXPUDevices(s.metricsCache)
+		xpuDevices := s.buildXPUDevice(xpuRawDevices)
+		annotations := s.buildXPUDeviceAnnotations(xpuRawDevices)
+		labels := s.buildXPUDeviceLabels(xpuRawDevices)
+		klog.V(4).Infof("Device: annotations: %s, labels %s", annotations, labels)
+		if len(xpuDevices) != 0 {
+			klog.V(2).Infof("report xpu devices from device infos directory")
+			device.Spec.Devices = append(device.Spec.Devices, xpuDevices...)
+			device.ObjectMeta.Annotations = annotations
+			device.ObjectMeta.Labels = labels
+			skipBuildGPU = true
+		}
+	}()
+	func() {
+		// if xpu devices exist, report xpu devices; others, fallback to report gpu devices from nvml
+		if s.config.XPUEnforceCollectFromDeviceInfos || skipBuildGPU {
+			return
+		}
+		gpuDevices := s.buildGPUDevice()
+		if len(gpuDevices) == 0 {
+			return
+		}
+		klog.V(2).Infof("report gpu devices from nvml")
+		gpuModel, gpuDriverVer := s.getGPUDriverAndModelFunc()
+		s.fillGPUDevice(device, gpuDevices, gpuModel, gpuDriverVer)
+	}()
+	func() {
+		rdmaDevices := s.buildRDMADevice()
+		if len(rdmaDevices) != 0 {
+			device.Spec.Devices = append(device.Spec.Devices, rdmaDevices...)
+		}
+	}()
 
 	err := s.updateDevice(device)
 	if err == nil {
@@ -98,6 +130,8 @@ func (s *statesInformer) fillGPUDevice(device *schedulingv1alpha1.Device,
 	if device.Labels == nil {
 		device.Labels = make(map[string]string)
 	}
+	// currently the built-in informer only supports NVIDIA GPUs
+	device.Labels[extension.LabelGPUVendor] = extension.GPUVendorNVIDIA
 	if gpuModel != "" {
 		device.Labels[extension.LabelGPUModel] = gpuModel
 	}
@@ -114,10 +148,22 @@ func (s *statesInformer) createDevice(device *schedulingv1alpha1.Device) error {
 func (s *statesInformer) updateDevice(device *schedulingv1alpha1.Device) error {
 	sorter := func(devices []schedulingv1alpha1.DeviceInfo) {
 		sort.Slice(devices, func(i, j int) bool {
+			if devices[i].Type != devices[j].Type {
+				return devices[i].Type < devices[j].Type
+			}
 			return *(devices[i].Minor) < *(devices[j].Minor)
 		})
 	}
 	sorter(device.Spec.Devices)
+
+	conditionSorter := func(conditions []metav1.Condition) {
+		sort.Slice(conditions, func(i, j int) bool {
+			return conditions[i].Type < conditions[j].Type
+		})
+	}
+	for i := range device.Spec.Devices {
+		conditionSorter(device.Spec.Devices[i].Conditions)
+	}
 
 	return util.RetryOnConflictOrTooManyRequests(func() error {
 		latestDevice, err := s.deviceClient.Get(context.TODO(), device.Name, metav1.GetOptions{ResourceVersion: "0"})
@@ -127,13 +173,40 @@ func (s *statesInformer) updateDevice(device *schedulingv1alpha1.Device) error {
 		sorter(latestDevice.Spec.Devices)
 
 		if apiequality.Semantic.DeepEqual(device.Spec.Devices, latestDevice.Spec.Devices) &&
-			apiequality.Semantic.DeepEqual(device.Labels, latestDevice.Labels) {
+			apiequality.Semantic.DeepEqual(device.Labels, latestDevice.Labels) &&
+			apiequality.Semantic.DeepEqual(device.Annotations, latestDevice.Annotations) {
 			klog.V(4).Infof("Device %s has not changed and does not need to be updated", device.Name)
 			return nil
 		}
 
+		// update the device info conditions
+		oldDevConditionsMap := make(map[string]map[string]metav1.Condition, len(latestDevice.Spec.Devices))
+		for _, oldDev := range latestDevice.Spec.Devices {
+			conditionTypeMap := make(map[string]metav1.Condition, len(oldDev.Conditions))
+			for _, condition := range oldDev.Conditions {
+				conditionTypeMap[condition.Type] = condition
+			}
+			oldDevConditionsMap[oldDev.UUID] = conditionTypeMap
+		}
+
+		for i, newDev := range device.Spec.Devices {
+			if conditionTypeMap, ok := oldDevConditionsMap[newDev.UUID]; ok {
+				for j := range newDev.Conditions {
+					if oldCondition, ok := conditionTypeMap[newDev.Conditions[j].Type]; ok {
+						if oldCondition.Status != newDev.Conditions[j].Status {
+							newDev.Conditions[j].LastTransitionTime = metav1.Now()
+						} else {
+							newDev.Conditions[j].LastTransitionTime = oldCondition.LastTransitionTime
+						}
+					}
+				}
+				device.Spec.Devices[i] = newDev
+			}
+		}
+
 		latestDevice.Spec.Devices = device.Spec.Devices
 		latestDevice.Labels = device.Labels
+		latestDevice.Annotations = device.Annotations
 
 		_, err = s.deviceClient.Update(context.TODO(), latestDevice, metav1.UpdateOptions{})
 		return err
@@ -162,6 +235,17 @@ func (s *statesInformer) buildGPUDevice() []schedulingv1alpha1.DeviceInfo {
 			health = false
 		}
 		s.gpuMutex.RUnlock()
+
+		var topology *schedulingv1alpha1.DeviceTopology
+		if gpu.NodeID >= 0 && gpu.PCIE != "" && gpu.BusID != "" {
+			topology = &schedulingv1alpha1.DeviceTopology{
+				SocketID: -1,
+				NodeID:   gpu.NodeID,
+				PCIEID:   gpu.PCIE,
+				BusID:    gpu.BusID,
+			}
+		}
+
 		deviceInfos = append(deviceInfos, schedulingv1alpha1.DeviceInfo{
 			UUID:   gpu.UUID,
 			Minor:  &gpu.Minor,
@@ -172,8 +256,113 @@ func (s *statesInformer) buildGPUDevice() []schedulingv1alpha1.DeviceInfo {
 				extension.ResourceGPUMemory:      *resource.NewQuantity(int64(gpu.MemoryTotal), resource.BinarySI),
 				extension.ResourceGPUMemoryRatio: *resource.NewQuantity(100, resource.DecimalSI),
 			},
+			Topology: topology,
 		})
 	}
+	return deviceInfos
+}
+
+func (s *statesInformer) buildRDMADevice() []schedulingv1alpha1.DeviceInfo {
+	rawRDMADevices, exist := s.metricsCache.Get(koordletuti.RDMADeviceType)
+	if !exist {
+		klog.V(4).Infof("rdma device not exist")
+		return nil
+	}
+	rdmaDevices := rawRDMADevices.(koordletuti.RDMADevices)
+	var deviceInfos []schedulingv1alpha1.DeviceInfo
+	for idx := range rdmaDevices {
+		rdma := rdmaDevices[idx]
+		deviceInfo := schedulingv1alpha1.DeviceInfo{
+			UUID:   rdma.ID,
+			Minor:  pointer.Int32(rdma.Minor),
+			Type:   schedulingv1alpha1.RDMA,
+			Health: rdma.Health,
+			Resources: map[corev1.ResourceName]resource.Quantity{
+				extension.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+			},
+			Topology: &schedulingv1alpha1.DeviceTopology{
+				SocketID: -1,
+				NodeID:   rdma.NodeID,
+				PCIEID:   rdma.PCIE,
+				BusID:    rdma.BusID,
+			},
+		}
+		if rdma.VFEnabled {
+			var vfs []schedulingv1alpha1.VirtualFunction
+			for _, vf := range rdma.VFMap {
+				vfs = append(vfs, schedulingv1alpha1.VirtualFunction{
+					Minor: -1,
+					BusID: vf.ID,
+				})
+			}
+			sort.Slice(vfs, func(i, j int) bool {
+				return vfs[i].BusID < vfs[j].BusID
+			})
+			deviceInfo.VFGroups = append(deviceInfo.VFGroups, schedulingv1alpha1.VirtualFunctionGroup{
+				Labels: nil,
+				VFs:    vfs,
+			})
+		}
+		deviceInfos = append(deviceInfos, deviceInfo)
+	}
+
+	sort.Slice(deviceInfos, func(i, j int) bool {
+		return *deviceInfos[i].Minor < *deviceInfos[j].Minor
+	})
+
+	return deviceInfos
+}
+
+func (s *statesInformer) buildXPUDevice(xpuDevices koordletuti.XPUDevices) []schedulingv1alpha1.DeviceInfo {
+	var deviceInfos []schedulingv1alpha1.DeviceInfo
+	for idx := range xpuDevices {
+		xpu := xpuDevices[idx]
+
+		minor, err := strconv.ParseInt(xpu.Minor, 10, 32)
+		if err != nil {
+			klog.Errorf("failed to parse xpu minor %s, err: %v", xpu.Minor, err)
+		}
+
+		resources := make(map[corev1.ResourceName]resource.Quantity)
+		resources[extension.ResourceGPUMemoryRatio] = *resource.NewQuantity(100, resource.DecimalSI)
+		for resourceName, resourceQuantity := range xpu.Resources {
+			quantity, err := resource.ParseQuantity(resourceQuantity)
+			if err != nil {
+				klog.Errorf("failed to parse xpu resource %s %s, err: %v", resourceName, resourceQuantity, err)
+				continue
+			}
+			// check resource name equal "gpu-core" or "gpu-memory" but not starts with "koordinator.sh/"
+			if resourceName == "gpu-core" || resourceName == "gpu-memory" {
+				resourceName = extension.DomainPrefix + resourceName
+			}
+
+			resources[corev1.ResourceName(resourceName)] = quantity
+		}
+
+		deviceHealthy := true
+		if xpu.Status != nil {
+			deviceHealthy = xpu.Status.Healthy
+		}
+
+		topo := getXPUDeviceTopology(&xpu)
+		conditions := getXPUDeviceConditions(&xpu)
+
+		deviceInfo := schedulingv1alpha1.DeviceInfo{
+			UUID:       xpu.UUID,
+			Minor:      pointer.Int32(int32(minor)),
+			Type:       schedulingv1alpha1.GPU,
+			Health:     deviceHealthy,
+			Resources:  resources,
+			Topology:   topo,
+			Conditions: conditions,
+		}
+
+		deviceInfos = append(deviceInfos, deviceInfo)
+	}
+
+	sort.Slice(deviceInfos, func(i, j int) bool {
+		return deviceInfos[i].UUID < deviceInfos[j].UUID
+	})
 	return deviceInfos
 }
 
@@ -348,4 +537,158 @@ func checkHealth(stopCh <-chan struct{}, devs []string, xids chan<- string) {
 			}
 		}
 	}
+}
+
+func (s *statesInformer) buildXPUDeviceLabels(xpuDevices koordletuti.XPUDevices) map[string]string {
+	if len(xpuDevices) == 0 {
+		return nil
+	}
+
+	// use the first device's vendor and model as the label value
+	vendor := xpuDevices[0].Vendor
+	model := xpuDevices[0].Model
+
+	label := map[string]string{
+		extension.LabelGPUModel:  model,
+		extension.LabelGPUVendor: vendor,
+	}
+
+	if xpuDevices[0].Topology != nil && xpuDevices[0].Topology.P2PLinks != nil {
+		// If the device has P2P links, set the partition policy
+		label[extension.LabelGPUPartitionPolicy] = string(extension.GPUPartitionPolicyPrefer)
+		if xpuDevices[0].Topology.MustHonorPartition {
+			label[extension.LabelGPUPartitionPolicy] = string(extension.GPUPartitionPolicyHonor)
+		}
+	}
+
+	return label
+}
+
+func (s *statesInformer) buildXPUDeviceAnnotations(xpuDevices koordletuti.XPUDevices) map[string]string {
+	partitionTable := getPartitionTableFromXPUDevices(xpuDevices)
+	if len(partitionTable) == 0 {
+		return map[string]string{}
+	}
+	rawBytes, err := json.Marshal(partitionTable)
+	if err != nil {
+		klog.Errorf("failed to marshal gpu partition table, err: %v", err)
+		return nil
+	}
+
+	return map[string]string{
+		extension.AnnotationGPUPartitions: string(rawBytes),
+	}
+}
+
+func getPartitionTableFromXPUDevices(xpus koordletuti.XPUDevices) extension.GPUPartitionTable {
+	partitions := make(extension.GPUPartitionTable)
+	minorsSet := sets.NewString()
+
+	for _, xpu := range xpus {
+		if xpu.Topology == nil || xpu.Topology.P2PLinks == nil {
+			continue
+		}
+
+		for _, p2pLink := range xpu.Topology.P2PLinks {
+			if p2pLink.PeerMinor == "" || string(p2pLink.Type) == "" {
+				klog.Errorf("xpu %s-%s-%s has invalid p2p link %v", xpu.Vendor, xpu.Model, xpu.Minor, p2pLink)
+				continue
+			}
+
+			minorsIntSet := sets.NewInt()
+			minorsStr := strings.Split(p2pLink.PeerMinor, ",")
+			minorsStr = append(minorsStr, xpu.Minor)
+			for _, minor := range minorsStr {
+				minorInt, err := strconv.Atoi(minor)
+				if err != nil {
+					klog.Errorf("failed to parse peer minor %s, err: %v", p2pLink.PeerMinor, err)
+					continue
+				}
+				minorsIntSet.Insert(minorInt)
+			}
+			minorsInt := minorsIntSet.UnsortedList()
+			sort.Ints(minorsInt)
+
+			key := fmt.Sprint(minorsInt)
+			if minorsSet.Has(key) {
+				continue
+			}
+			minorsSet.Insert(key)
+
+			partition := extension.GPUPartition{
+				Minors:          minorsInt,
+				GPULinkType:     extension.GPULinkType(p2pLink.Type),
+				AllocationScore: 1,
+			}
+
+			partitions[len(minorsInt)] = append(partitions[len(minorsInt)], partition)
+		}
+	}
+
+	return partitions
+}
+
+func getXPUDevices(metricsCache metriccache.MetricCache) koordletuti.XPUDevices {
+	rawXPUDevices, exist := metricsCache.Get(koordletuti.XPUDeviceType)
+	if !exist {
+		klog.V(4).Infof("xpu device not exist")
+		return nil
+	}
+	xpuDevices := rawXPUDevices.(koordletuti.XPUDevices)
+
+	return xpuDevices
+}
+
+func getXPUDeviceTopology(xpu *koordletuti.XPUDeviceInfo) *schedulingv1alpha1.DeviceTopology {
+	if xpu == nil || xpu.Topology == nil {
+		return nil
+	}
+
+	var nodeID int32
+	if xpu.Topology.NodeID != "" {
+		nodeIDRaw, err := strconv.ParseInt(xpu.Topology.NodeID, 10, 32)
+		if err != nil {
+			klog.Errorf("failed to parse nodeID %s, err: %v", xpu.Topology.NodeID, err)
+		}
+		nodeID = int32(nodeIDRaw)
+	} else {
+		nodeID = -1
+	}
+
+	return &schedulingv1alpha1.DeviceTopology{
+		SocketID: -1,
+		NodeID:   nodeID,
+		PCIEID:   xpu.Topology.PCIEID,
+		BusID:    xpu.Topology.BusID,
+	}
+}
+
+func getXPUDeviceConditions(xpu *koordletuti.XPUDeviceInfo) []metav1.Condition {
+	if xpu == nil || xpu.Status == nil {
+		return nil
+	}
+
+	conditions := []metav1.Condition{
+		{
+			Type:               string(schedulingv1alpha1.DeviceConditionHealthy),
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "DeviceHealthy",
+			Message:            "device is healthy",
+		},
+	}
+
+	if !xpu.Status.Healthy {
+		conditions[0].Status = metav1.ConditionFalse
+		conditions[0].Reason = "Unknown"
+		if xpu.Status.ErrCode != "" {
+			conditions[0].Reason = xpu.Status.ErrCode
+		}
+		conditions[0].Message = "device is unhealthy"
+		if xpu.Status.ErrMessage != "" {
+			conditions[0].Message = xpu.Status.ErrMessage
+		}
+	}
+
+	return conditions
 }

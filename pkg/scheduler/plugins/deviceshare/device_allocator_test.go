@@ -46,8 +46,22 @@ var (
 		apiext.ResourceGPUMemory:      *resource.NewQuantity(85198045184, resource.BinarySI),
 	}
 
+	gpuSharedResourceList = corev1.ResourceList{
+		apiext.ResourceGPUCore:        *resource.NewQuantity(50, resource.DecimalSI),
+		apiext.ResourceGPUMemoryRatio: *resource.NewQuantity(50, resource.DecimalSI),
+		apiext.ResourceGPUMemory:      *resource.NewQuantity(42599022592, resource.BinarySI),
+	}
+
+	huaweiNPUSharedResourceList = corev1.ResourceList{
+		apiext.ResourceHuaweiNPUCore:  *resource.NewQuantity(4, resource.DecimalSI),
+		apiext.ResourceHuaweiNPUCPU:   *resource.NewQuantity(4, resource.DecimalSI),
+		apiext.ResourceHuaweiNPUDVPP:  *resource.NewQuantity(50, resource.DecimalSI),
+		apiext.ResourceGPUMemoryRatio: *resource.NewQuantity(50, resource.DecimalSI),
+		apiext.ResourceGPUMemory:      *resource.NewQuantity(12884901888, resource.BinarySI),
+	}
+
 	fakeDeviceCR = func() *schedulingv1alpha1.Device {
-		var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:1f:00.2"},{"minor":1,"busID":"0000:1f:00.3"},{"minor":2,"busID":"0000:1f:00.4"},{"minor":3,"busID":"0000:1f:00.5"},{"minor":4,"busID":"0000:1f:00.6"},{"minor":5,"busID":"0000:1f:00.7"},{"minor":6,"busID":"0000:1f:01.0"},{"minor":7,"busID":"0000:1f:01.1"},{"minor":8,"busID":"0000:1f:01.2"},{"minor":9,"busID":"0000:1f:01.3"},{"minor":10,"busID":"0000:1f:01.4"},{"minor":11,"busID":"0000:1f:01.5"},{"minor":12,"busID":"0000:1f:01.6"},{"minor":13,"busID":"0000:1f:01.7"},{"minor":14,"busID":"0000:1f:02.0"},{"minor":15,"busID":"0000:1f:02.1"},{"minor":16,"busID":"0000:1f:02.2"},{"minor":17,"busID":"0000:1f:02.3"},{"minor":18,"busID":"0000:1f:02.4"},{"minor":19,"busID":"0000:1f:02.5"},{"minor":20,"busID":"0000:1f:02.6"},{"minor":21,"busID":"0000:1f:02.7"},{"minor":22,"busID":"0000:1f:03.0"},{"minor":23,"busID":"0000:1f:03.1"},{"minor":24,"busID":"0000:1f:03.2"},{"minor":25,"busID":"0000:1f:03.3"},{"minor":26,"busID":"0000:1f:03.4"},{"minor":27,"busID":"0000:1f:03.5"},{"minor":28,"busID":"0000:1f:03.6"},{"minor":29,"busID":"0000:1f:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:90:00.2"},{"minor":1,"busID":"0000:90:00.3"},{"minor":2,"busID":"0000:90:00.4"},{"minor":3,"busID":"0000:90:00.5"},{"minor":4,"busID":"0000:90:00.6"},{"minor":5,"busID":"0000:90:00.7"},{"minor":6,"busID":"0000:90:01.0"},{"minor":7,"busID":"0000:90:01.1"},{"minor":8,"busID":"0000:90:01.2"},{"minor":9,"busID":"0000:90:01.3"},{"minor":10,"busID":"0000:90:01.4"},{"minor":11,"busID":"0000:90:01.5"},{"minor":12,"busID":"0000:90:01.6"},{"minor":13,"busID":"0000:90:01.7"},{"minor":14,"busID":"0000:90:02.0"},{"minor":15,"busID":"0000:90:02.1"},{"minor":16,"busID":"0000:90:02.2"},{"minor":17,"busID":"0000:90:02.3"},{"minor":18,"busID":"0000:90:02.4"},{"minor":19,"busID":"0000:90:02.5"},{"minor":20,"busID":"0000:90:02.6"},{"minor":21,"busID":"0000:90:02.7"},{"minor":22,"busID":"0000:90:03.0"},{"minor":23,"busID":"0000:90:03.1"},{"minor":24,"busID":"0000:90:03.2"},{"minor":25,"busID":"0000:90:03.3"},{"minor":26,"busID":"0000:90:03.4"},{"minor":27,"busID":"0000:90:03.5"},{"minor":28,"busID":"0000:90:03.6"},{"minor":29,"busID":"0000:90:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:51:00.2"},{"minor":1,"busID":"0000:51:00.3"},{"minor":2,"busID":"0000:51:00.4"},{"minor":3,"busID":"0000:51:00.5"},{"minor":4,"busID":"0000:51:00.6"},{"minor":5,"busID":"0000:51:00.7"},{"minor":6,"busID":"0000:51:01.0"},{"minor":7,"busID":"0000:51:01.1"},{"minor":8,"busID":"0000:51:01.2"},{"minor":9,"busID":"0000:51:01.3"},{"minor":10,"busID":"0000:51:01.4"},{"minor":11,"busID":"0000:51:01.5"},{"minor":12,"busID":"0000:51:01.6"},{"minor":13,"busID":"0000:51:01.7"},{"minor":14,"busID":"0000:51:02.0"},{"minor":15,"busID":"0000:51:02.1"},{"minor":16,"busID":"0000:51:02.2"},{"minor":17,"busID":"0000:51:02.3"},{"minor":18,"busID":"0000:51:02.4"},{"minor":19,"busID":"0000:51:02.5"},{"minor":20,"busID":"0000:51:02.6"},{"minor":21,"busID":"0000:51:02.7"},{"minor":22,"busID":"0000:51:03.0"},{"minor":23,"busID":"0000:51:03.1"},{"minor":24,"busID":"0000:51:03.2"},{"minor":25,"busID":"0000:51:03.3"},{"minor":26,"busID":"0000:51:03.4"},{"minor":27,"busID":"0000:51:03.5"},{"minor":28,"busID":"0000:51:03.6"},{"minor":29,"busID":"0000:51:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:b9:00.2"},{"minor":1,"busID":"0000:b9:00.3"},{"minor":2,"busID":"0000:b9:00.4"},{"minor":3,"busID":"0000:b9:00.5"},{"minor":4,"busID":"0000:b9:00.6"},{"minor":5,"busID":"0000:b9:00.7"},{"minor":6,"busID":"0000:b9:01.0"},{"minor":7,"busID":"0000:b9:01.1"},{"minor":8,"busID":"0000:b9:01.2"},{"minor":9,"busID":"0000:b9:01.3"},{"minor":10,"busID":"0000:b9:01.4"},{"minor":11,"busID":"0000:b9:01.5"},{"minor":12,"busID":"0000:b9:01.6"},{"minor":13,"busID":"0000:b9:01.7"},{"minor":14,"busID":"0000:b9:02.0"},{"minor":15,"busID":"0000:b9:02.1"},{"minor":16,"busID":"0000:b9:02.2"},{"minor":17,"busID":"0000:b9:02.3"},{"minor":18,"busID":"0000:b9:02.4"},{"minor":19,"busID":"0000:b9:02.5"},{"minor":20,"busID":"0000:b9:02.6"},{"minor":21,"busID":"0000:b9:02.7"},{"minor":22,"busID":"0000:b9:03.0"},{"minor":23,"busID":"0000:b9:03.1"},{"minor":24,"busID":"0000:b9:03.2"},{"minor":25,"busID":"0000:b9:03.3"},{"minor":26,"busID":"0000:b9:03.4"},{"minor":27,"busID":"0000:b9:03.5"},{"minor":28,"busID":"0000:b9:03.6"},{"minor":29,"busID":"0000:b9:03.7"}]}]},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}}]},"status":{}}`)
+		var data = []byte(`{"metadata":{"name":"test-node-1"},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:1f:00.2"},{"minor":1,"busID":"0000:1f:00.3"},{"minor":2,"busID":"0000:1f:00.4"},{"minor":3,"busID":"0000:1f:00.5"},{"minor":4,"busID":"0000:1f:00.6"},{"minor":5,"busID":"0000:1f:00.7"},{"minor":6,"busID":"0000:1f:01.0"},{"minor":7,"busID":"0000:1f:01.1"},{"minor":8,"busID":"0000:1f:01.2"},{"minor":9,"busID":"0000:1f:01.3"},{"minor":10,"busID":"0000:1f:01.4"},{"minor":11,"busID":"0000:1f:01.5"},{"minor":12,"busID":"0000:1f:01.6"},{"minor":13,"busID":"0000:1f:01.7"},{"minor":14,"busID":"0000:1f:02.0"},{"minor":15,"busID":"0000:1f:02.1"},{"minor":16,"busID":"0000:1f:02.2"},{"minor":17,"busID":"0000:1f:02.3"},{"minor":18,"busID":"0000:1f:02.4"},{"minor":19,"busID":"0000:1f:02.5"},{"minor":20,"busID":"0000:1f:02.6"},{"minor":21,"busID":"0000:1f:02.7"},{"minor":22,"busID":"0000:1f:03.0"},{"minor":23,"busID":"0000:1f:03.1"},{"minor":24,"busID":"0000:1f:03.2"},{"minor":25,"busID":"0000:1f:03.3"},{"minor":26,"busID":"0000:1f:03.4"},{"minor":27,"busID":"0000:1f:03.5"},{"minor":28,"busID":"0000:1f:03.6"},{"minor":29,"busID":"0000:1f:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:90:00.2"},{"minor":1,"busID":"0000:90:00.3"},{"minor":2,"busID":"0000:90:00.4"},{"minor":3,"busID":"0000:90:00.5"},{"minor":4,"busID":"0000:90:00.6"},{"minor":5,"busID":"0000:90:00.7"},{"minor":6,"busID":"0000:90:01.0"},{"minor":7,"busID":"0000:90:01.1"},{"minor":8,"busID":"0000:90:01.2"},{"minor":9,"busID":"0000:90:01.3"},{"minor":10,"busID":"0000:90:01.4"},{"minor":11,"busID":"0000:90:01.5"},{"minor":12,"busID":"0000:90:01.6"},{"minor":13,"busID":"0000:90:01.7"},{"minor":14,"busID":"0000:90:02.0"},{"minor":15,"busID":"0000:90:02.1"},{"minor":16,"busID":"0000:90:02.2"},{"minor":17,"busID":"0000:90:02.3"},{"minor":18,"busID":"0000:90:02.4"},{"minor":19,"busID":"0000:90:02.5"},{"minor":20,"busID":"0000:90:02.6"},{"minor":21,"busID":"0000:90:02.7"},{"minor":22,"busID":"0000:90:03.0"},{"minor":23,"busID":"0000:90:03.1"},{"minor":24,"busID":"0000:90:03.2"},{"minor":25,"busID":"0000:90:03.3"},{"minor":26,"busID":"0000:90:03.4"},{"minor":27,"busID":"0000:90:03.5"},{"minor":28,"busID":"0000:90:03.6"},{"minor":29,"busID":"0000:90:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:51:00.2"},{"minor":1,"busID":"0000:51:00.3"},{"minor":2,"busID":"0000:51:00.4"},{"minor":3,"busID":"0000:51:00.5"},{"minor":4,"busID":"0000:51:00.6"},{"minor":5,"busID":"0000:51:00.7"},{"minor":6,"busID":"0000:51:01.0"},{"minor":7,"busID":"0000:51:01.1"},{"minor":8,"busID":"0000:51:01.2"},{"minor":9,"busID":"0000:51:01.3"},{"minor":10,"busID":"0000:51:01.4"},{"minor":11,"busID":"0000:51:01.5"},{"minor":12,"busID":"0000:51:01.6"},{"minor":13,"busID":"0000:51:01.7"},{"minor":14,"busID":"0000:51:02.0"},{"minor":15,"busID":"0000:51:02.1"},{"minor":16,"busID":"0000:51:02.2"},{"minor":17,"busID":"0000:51:02.3"},{"minor":18,"busID":"0000:51:02.4"},{"minor":19,"busID":"0000:51:02.5"},{"minor":20,"busID":"0000:51:02.6"},{"minor":21,"busID":"0000:51:02.7"},{"minor":22,"busID":"0000:51:03.0"},{"minor":23,"busID":"0000:51:03.1"},{"minor":24,"busID":"0000:51:03.2"},{"minor":25,"busID":"0000:51:03.3"},{"minor":26,"busID":"0000:51:03.4"},{"minor":27,"busID":"0000:51:03.5"},{"minor":28,"busID":"0000:51:03.6"},{"minor":29,"busID":"0000:51:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:b9:00.2"},{"minor":1,"busID":"0000:b9:00.3"},{"minor":2,"busID":"0000:b9:00.4"},{"minor":3,"busID":"0000:b9:00.5"},{"minor":4,"busID":"0000:b9:00.6"},{"minor":5,"busID":"0000:b9:00.7"},{"minor":6,"busID":"0000:b9:01.0"},{"minor":7,"busID":"0000:b9:01.1"},{"minor":8,"busID":"0000:b9:01.2"},{"minor":9,"busID":"0000:b9:01.3"},{"minor":10,"busID":"0000:b9:01.4"},{"minor":11,"busID":"0000:b9:01.5"},{"minor":12,"busID":"0000:b9:01.6"},{"minor":13,"busID":"0000:b9:01.7"},{"minor":14,"busID":"0000:b9:02.0"},{"minor":15,"busID":"0000:b9:02.1"},{"minor":16,"busID":"0000:b9:02.2"},{"minor":17,"busID":"0000:b9:02.3"},{"minor":18,"busID":"0000:b9:02.4"},{"minor":19,"busID":"0000:b9:02.5"},{"minor":20,"busID":"0000:b9:02.6"},{"minor":21,"busID":"0000:b9:02.7"},{"minor":22,"busID":"0000:b9:03.0"},{"minor":23,"busID":"0000:b9:03.1"},{"minor":24,"busID":"0000:b9:03.2"},{"minor":25,"busID":"0000:b9:03.3"},{"minor":26,"busID":"0000:b9:03.4"},{"minor":27,"busID":"0000:b9:03.5"},{"minor":28,"busID":"0000:b9:03.6"},{"minor":29,"busID":"0000:b9:03.7"}]}]},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}}]}}`)
 		var device schedulingv1alpha1.Device
 		err := json.Unmarshal(data, &device)
 		if err != nil {
@@ -57,7 +71,17 @@ var (
 	}()
 
 	fakeDeviceCRWithoutTopology = func() *schedulingv1alpha1.Device {
-		var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"anntations":{}},"spec":{"devices":[{"type":"rdma","id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"rdma","id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"rdma","id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"rdma","id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}}]},"status":{}}`)
+		var data = []byte(`{"metadata":{"name":"test-node-1"},"spec":{"devices":[{"type":"rdma","id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"rdma","id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"rdma","id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"rdma","id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"}}]}}`)
+		var device schedulingv1alpha1.Device
+		err := json.Unmarshal(data, &device)
+		if err != nil {
+			panic(err)
+		}
+		return &device
+	}()
+
+	fakeDeviceCRWithHuaweiNPU = func() *schedulingv1alpha1.Device {
+		var data = []byte(`{"metadata":{"name":"test-node-1","labels":{"node.koordinator.sh/gpu-vendor":"huawei","node.koordinator.sh/gpu-model":"Ascend-310P"}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:1f:00.2"},{"minor":1,"busID":"0000:1f:00.3"},{"minor":2,"busID":"0000:1f:00.4"},{"minor":3,"busID":"0000:1f:00.5"},{"minor":4,"busID":"0000:1f:00.6"},{"minor":5,"busID":"0000:1f:00.7"},{"minor":6,"busID":"0000:1f:01.0"},{"minor":7,"busID":"0000:1f:01.1"},{"minor":8,"busID":"0000:1f:01.2"},{"minor":9,"busID":"0000:1f:01.3"},{"minor":10,"busID":"0000:1f:01.4"},{"minor":11,"busID":"0000:1f:01.5"},{"minor":12,"busID":"0000:1f:01.6"},{"minor":13,"busID":"0000:1f:01.7"},{"minor":14,"busID":"0000:1f:02.0"},{"minor":15,"busID":"0000:1f:02.1"},{"minor":16,"busID":"0000:1f:02.2"},{"minor":17,"busID":"0000:1f:02.3"},{"minor":18,"busID":"0000:1f:02.4"},{"minor":19,"busID":"0000:1f:02.5"},{"minor":20,"busID":"0000:1f:02.6"},{"minor":21,"busID":"0000:1f:02.7"},{"minor":22,"busID":"0000:1f:03.0"},{"minor":23,"busID":"0000:1f:03.1"},{"minor":24,"busID":"0000:1f:03.2"},{"minor":25,"busID":"0000:1f:03.3"},{"minor":26,"busID":"0000:1f:03.4"},{"minor":27,"busID":"0000:1f:03.5"},{"minor":28,"busID":"0000:1f:03.6"},{"minor":29,"busID":"0000:1f:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:90:00.2"},{"minor":1,"busID":"0000:90:00.3"},{"minor":2,"busID":"0000:90:00.4"},{"minor":3,"busID":"0000:90:00.5"},{"minor":4,"busID":"0000:90:00.6"},{"minor":5,"busID":"0000:90:00.7"},{"minor":6,"busID":"0000:90:01.0"},{"minor":7,"busID":"0000:90:01.1"},{"minor":8,"busID":"0000:90:01.2"},{"minor":9,"busID":"0000:90:01.3"},{"minor":10,"busID":"0000:90:01.4"},{"minor":11,"busID":"0000:90:01.5"},{"minor":12,"busID":"0000:90:01.6"},{"minor":13,"busID":"0000:90:01.7"},{"minor":14,"busID":"0000:90:02.0"},{"minor":15,"busID":"0000:90:02.1"},{"minor":16,"busID":"0000:90:02.2"},{"minor":17,"busID":"0000:90:02.3"},{"minor":18,"busID":"0000:90:02.4"},{"minor":19,"busID":"0000:90:02.5"},{"minor":20,"busID":"0000:90:02.6"},{"minor":21,"busID":"0000:90:02.7"},{"minor":22,"busID":"0000:90:03.0"},{"minor":23,"busID":"0000:90:03.1"},{"minor":24,"busID":"0000:90:03.2"},{"minor":25,"busID":"0000:90:03.3"},{"minor":26,"busID":"0000:90:03.4"},{"minor":27,"busID":"0000:90:03.5"},{"minor":28,"busID":"0000:90:03.6"},{"minor":29,"busID":"0000:90:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:51:00.2"},{"minor":1,"busID":"0000:51:00.3"},{"minor":2,"busID":"0000:51:00.4"},{"minor":3,"busID":"0000:51:00.5"},{"minor":4,"busID":"0000:51:00.6"},{"minor":5,"busID":"0000:51:00.7"},{"minor":6,"busID":"0000:51:01.0"},{"minor":7,"busID":"0000:51:01.1"},{"minor":8,"busID":"0000:51:01.2"},{"minor":9,"busID":"0000:51:01.3"},{"minor":10,"busID":"0000:51:01.4"},{"minor":11,"busID":"0000:51:01.5"},{"minor":12,"busID":"0000:51:01.6"},{"minor":13,"busID":"0000:51:01.7"},{"minor":14,"busID":"0000:51:02.0"},{"minor":15,"busID":"0000:51:02.1"},{"minor":16,"busID":"0000:51:02.2"},{"minor":17,"busID":"0000:51:02.3"},{"minor":18,"busID":"0000:51:02.4"},{"minor":19,"busID":"0000:51:02.5"},{"minor":20,"busID":"0000:51:02.6"},{"minor":21,"busID":"0000:51:02.7"},{"minor":22,"busID":"0000:51:03.0"},{"minor":23,"busID":"0000:51:03.1"},{"minor":24,"busID":"0000:51:03.2"},{"minor":25,"busID":"0000:51:03.3"},{"minor":26,"busID":"0000:51:03.4"},{"minor":27,"busID":"0000:51:03.5"},{"minor":28,"busID":"0000:51:03.6"},{"minor":29,"busID":"0000:51:03.7"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:b9:00.2"},{"minor":1,"busID":"0000:b9:00.3"},{"minor":2,"busID":"0000:b9:00.4"},{"minor":3,"busID":"0000:b9:00.5"},{"minor":4,"busID":"0000:b9:00.6"},{"minor":5,"busID":"0000:b9:00.7"},{"minor":6,"busID":"0000:b9:01.0"},{"minor":7,"busID":"0000:b9:01.1"},{"minor":8,"busID":"0000:b9:01.2"},{"minor":9,"busID":"0000:b9:01.3"},{"minor":10,"busID":"0000:b9:01.4"},{"minor":11,"busID":"0000:b9:01.5"},{"minor":12,"busID":"0000:b9:01.6"},{"minor":13,"busID":"0000:b9:01.7"},{"minor":14,"busID":"0000:b9:02.0"},{"minor":15,"busID":"0000:b9:02.1"},{"minor":16,"busID":"0000:b9:02.2"},{"minor":17,"busID":"0000:b9:02.3"},{"minor":18,"busID":"0000:b9:02.4"},{"minor":19,"busID":"0000:b9:02.5"},{"minor":20,"busID":"0000:b9:02.6"},{"minor":21,"busID":"0000:b9:02.7"},{"minor":22,"busID":"0000:b9:03.0"},{"minor":23,"busID":"0000:b9:03.1"},{"minor":24,"busID":"0000:b9:03.2"},{"minor":25,"busID":"0000:b9:03.3"},{"minor":26,"busID":"0000:b9:03.4"},{"minor":27,"busID":"0000:b9:03.5"},{"minor":28,"busID":"0000:b9:03.6"},{"minor":29,"busID":"0000:b9:03.7"}]}]},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-56102003","minor":0,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-76273648","minor":1,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-10928356","minor":2,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-10008726","minor":3,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-66454748","minor":4,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-92837465","minor":5,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-00192837","minor":6,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}},{"type":"gpu","id":"185011D4-21104518-A0C4ED94-14CC040A-12340987","minor":7,"health":true,"resources":{"huawei.com/npu-core":"8","huawei.com/npu-cpu":"7","huawei.com/npu-dvpp":"100","koordinator.sh/gpu-memory":"24Gi","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}}]}}`)
 		var device schedulingv1alpha1.Device
 		err := json.Unmarshal(data, &device)
 		if err != nil {
@@ -142,13 +166,15 @@ func setDefaultTestDeviceJointAllocate(t *testing.T, pod *corev1.Pod, options ..
 
 func TestAutopilotAllocator(t *testing.T) {
 	tests := []struct {
-		name            string
-		deviceCR        *schedulingv1alpha1.Device
-		gpuWanted       int
-		hostNetwork     bool
-		assignedDevices apiext.DeviceAllocations
-		want            apiext.DeviceAllocations
-		wantErr         bool
+		name                       string
+		deviceCR                   *schedulingv1alpha1.Device
+		gpuWanted                  int
+		rdmaWanted                 int
+		hostNetwork                bool
+		secondaryDeviceWellPlanned bool
+		assignedDevices            apiext.DeviceAllocations
+		want                       apiext.DeviceAllocations
+		wantErr                    bool
 	}{
 		{
 			name:      "request 1 GPU and 1 VF but invalid Device Topology",
@@ -666,7 +692,7 @@ func TestAutopilotAllocator(t *testing.T) {
 		{
 			name: "Only 1 RDMA and 4 PCIE with 2 GPUs Per PCIE, allocate 4 GPUs",
 			deviceCR: func() *schedulingv1alpha1.Device {
-				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:20:00.0"},{"minor":1,"busID":"0000:20:00.1"},{"minor":2,"busID":"0000:20:00.2"},{"minor":3,"busID":"0000:20:00.3"},{"minor":4,"busID":"0000:20:00.4"},{"minor":5,"busID":"0000:20:00.5"},{"minor":6,"busID":"0000:20:00.6"},{"minor":7,"busID":"0000:20:00.7"},{"minor":8,"busID":"0000:20:00.8"},{"minor":9,"busID":"0000:20:00.9"},{"minor":10,"busID":"0000:20:00.a"},{"minor":11,"busID":"0000:20:00.b"},{"minor":12,"busID":"0000:20:00.c"},{"minor":13,"busID":"0000:20:00.d"},{"minor":14,"busID":"0000:20:00.e"},{"minor":15,"busID":"0000:20:00.f"},{"minor":16,"busID":"0000:20:00.10"},{"minor":17,"busID":"0000:20:00.11"},{"minor":18,"busID":"0000:20:00.12"},{"minor":19,"busID":"0000:20:00.13"},{"minor":20,"busID":"0000:20:00.14"},{"minor":21,"busID":"0000:20:00.15"},{"minor":22,"busID":"0000:20:00.16"},{"minor":23,"busID":"0000:20:00.17"},{"minor":24,"busID":"0000:20:00.18"},{"minor":25,"busID":"0000:20:00.19"},{"minor":26,"busID":"0000:20:00.1a"},{"minor":27,"busID":"0000:20:00.1b"},{"minor":28,"busID":"0000:20:00.1c"},{"minor":29,"busID":"0000:20:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}}]},"status":{}}`)
+				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:20:00.0"},{"minor":1,"busID":"0000:20:00.1"},{"minor":2,"busID":"0000:20:00.2"},{"minor":3,"busID":"0000:20:00.3"},{"minor":4,"busID":"0000:20:00.4"},{"minor":5,"busID":"0000:20:00.5"},{"minor":6,"busID":"0000:20:00.6"},{"minor":7,"busID":"0000:20:00.7"},{"minor":8,"busID":"0000:20:00.8"},{"minor":9,"busID":"0000:20:00.9"},{"minor":10,"busID":"0000:20:00.a"},{"minor":11,"busID":"0000:20:00.b"},{"minor":12,"busID":"0000:20:00.c"},{"minor":13,"busID":"0000:20:00.d"},{"minor":14,"busID":"0000:20:00.e"},{"minor":15,"busID":"0000:20:00.f"},{"minor":16,"busID":"0000:20:00.10"},{"minor":17,"busID":"0000:20:00.11"},{"minor":18,"busID":"0000:20:00.12"},{"minor":19,"busID":"0000:20:00.13"},{"minor":20,"busID":"0000:20:00.14"},{"minor":21,"busID":"0000:20:00.15"},{"minor":22,"busID":"0000:20:00.16"},{"minor":23,"busID":"0000:20:00.17"},{"minor":24,"busID":"0000:20:00.18"},{"minor":25,"busID":"0000:20:00.19"},{"minor":26,"busID":"0000:20:00.1a"},{"minor":27,"busID":"0000:20:00.1b"},{"minor":28,"busID":"0000:20:00.1c"},{"minor":29,"busID":"0000:20:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}}]},"status":{}}`)
 				var deviceCR schedulingv1alpha1.Device
 				_ = json.Unmarshal(data, &deviceCR)
 				return &deviceCR
@@ -806,9 +832,223 @@ func TestAutopilotAllocator(t *testing.T) {
 			},
 		},
 		{
+			name: "2 RDMA with 2 GPUs Per PCIE, 2 NUMA Nodes, assigned 4 GPUs, requests 4 GPUs",
+			deviceCR: func() *schedulingv1alpha1.Device {
+				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:20:00.0"},{"minor":1,"busID":"0000:20:00.1"},{"minor":2,"busID":"0000:20:00.2"},{"minor":3,"busID":"0000:20:00.3"},{"minor":4,"busID":"0000:20:00.4"},{"minor":5,"busID":"0000:20:00.5"},{"minor":6,"busID":"0000:20:00.6"},{"minor":7,"busID":"0000:20:00.7"},{"minor":8,"busID":"0000:20:00.8"},{"minor":9,"busID":"0000:20:00.9"},{"minor":10,"busID":"0000:20:00.a"},{"minor":11,"busID":"0000:20:00.b"},{"minor":12,"busID":"0000:20:00.c"},{"minor":13,"busID":"0000:20:00.d"},{"minor":14,"busID":"0000:20:00.e"},{"minor":15,"busID":"0000:20:00.f"},{"minor":16,"busID":"0000:20:00.10"},{"minor":17,"busID":"0000:20:00.11"},{"minor":18,"busID":"0000:20:00.12"},{"minor":19,"busID":"0000:20:00.13"},{"minor":20,"busID":"0000:20:00.14"},{"minor":21,"busID":"0000:20:00.15"},{"minor":22,"busID":"0000:20:00.16"},{"minor":23,"busID":"0000:20:00.17"},{"minor":24,"busID":"0000:20:00.18"},{"minor":25,"busID":"0000:20:00.19"},{"minor":26,"busID":"0000:20:00.1a"},{"minor":27,"busID":"0000:20:00.1b"},{"minor":28,"busID":"0000:20:00.1c"},{"minor":29,"busID":"0000:20:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:21:00.0"},{"minor":1,"busID":"0000:21:00.1"},{"minor":2,"busID":"0000:21:00.2"},{"minor":3,"busID":"0000:21:00.3"},{"minor":4,"busID":"0000:21:00.4"},{"minor":5,"busID":"0000:21:00.5"},{"minor":6,"busID":"0000:21:00.6"},{"minor":7,"busID":"0000:21:00.7"},{"minor":8,"busID":"0000:21:00.8"},{"minor":9,"busID":"0000:21:00.9"},{"minor":10,"busID":"0000:21:00.a"},{"minor":11,"busID":"0000:21:00.b"},{"minor":12,"busID":"0000:21:00.c"},{"minor":13,"busID":"0000:21:00.d"},{"minor":14,"busID":"0000:21:00.e"},{"minor":15,"busID":"0000:21:00.f"},{"minor":16,"busID":"0000:21:00.10"},{"minor":17,"busID":"0000:21:00.11"},{"minor":18,"busID":"0000:21:00.12"},{"minor":19,"busID":"0000:21:00.13"},{"minor":20,"busID":"0000:21:00.14"},{"minor":21,"busID":"0000:21:00.15"},{"minor":22,"busID":"0000:21:00.16"},{"minor":23,"busID":"0000:21:00.17"},{"minor":24,"busID":"0000:21:00.18"},{"minor":25,"busID":"0000:21:00.19"},{"minor":26,"busID":"0000:21:00.1a"},{"minor":27,"busID":"0000:21:00.1b"},{"minor":28,"busID":"0000:21:00.1c"},{"minor":29,"busID":"0000:21:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:22:00.0"},{"minor":1,"busID":"0000:22:00.1"},{"minor":2,"busID":"0000:22:00.2"},{"minor":3,"busID":"0000:22:00.3"},{"minor":4,"busID":"0000:22:00.4"},{"minor":5,"busID":"0000:22:00.5"},{"minor":6,"busID":"0000:22:00.6"},{"minor":7,"busID":"0000:22:00.7"},{"minor":8,"busID":"0000:22:00.8"},{"minor":9,"busID":"0000:22:00.9"},{"minor":10,"busID":"0000:22:00.a"},{"minor":11,"busID":"0000:22:00.b"},{"minor":12,"busID":"0000:22:00.c"},{"minor":13,"busID":"0000:22:00.d"},{"minor":14,"busID":"0000:22:00.e"},{"minor":15,"busID":"0000:22:00.f"},{"minor":16,"busID":"0000:22:00.10"},{"minor":17,"busID":"0000:22:00.11"},{"minor":18,"busID":"0000:22:00.12"},{"minor":19,"busID":"0000:22:00.13"},{"minor":20,"busID":"0000:22:00.14"},{"minor":21,"busID":"0000:22:00.15"},{"minor":22,"busID":"0000:22:00.16"},{"minor":23,"busID":"0000:22:00.17"},{"minor":24,"busID":"0000:22:00.18"},{"minor":25,"busID":"0000:22:00.19"},{"minor":26,"busID":"0000:22:00.1a"},{"minor":27,"busID":"0000:22:00.1b"},{"minor":28,"busID":"0000:22:00.1c"},{"minor":29,"busID":"0000:22:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:23:00.0"},{"minor":1,"busID":"0000:23:00.1"},{"minor":2,"busID":"0000:23:00.2"},{"minor":3,"busID":"0000:23:00.3"},{"minor":4,"busID":"0000:23:00.4"},{"minor":5,"busID":"0000:23:00.5"},{"minor":6,"busID":"0000:23:00.6"},{"minor":7,"busID":"0000:23:00.7"},{"minor":8,"busID":"0000:23:00.8"},{"minor":9,"busID":"0000:23:00.9"},{"minor":10,"busID":"0000:23:00.a"},{"minor":11,"busID":"0000:23:00.b"},{"minor":12,"busID":"0000:23:00.c"},{"minor":13,"busID":"0000:23:00.d"},{"minor":14,"busID":"0000:23:00.e"},{"minor":15,"busID":"0000:23:00.f"},{"minor":16,"busID":"0000:23:00.10"},{"minor":17,"busID":"0000:23:00.11"},{"minor":18,"busID":"0000:23:00.12"},{"minor":19,"busID":"0000:23:00.13"},{"minor":20,"busID":"0000:23:00.14"},{"minor":21,"busID":"0000:23:00.15"},{"minor":22,"busID":"0000:23:00.16"},{"minor":23,"busID":"0000:23:00.17"},{"minor":24,"busID":"0000:23:00.18"},{"minor":25,"busID":"0000:23:00.19"},{"minor":26,"busID":"0000:23:00.1a"},{"minor":27,"busID":"0000:23:00.1b"},{"minor":28,"busID":"0000:23:00.1c"},{"minor":29,"busID":"0000:23:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0001:1f:00.0","minor":5,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0001:20:00.0"},{"minor":1,"busID":"0001:20:00.1"},{"minor":2,"busID":"0001:20:00.2"},{"minor":3,"busID":"0001:20:00.3"},{"minor":4,"busID":"0001:20:00.4"},{"minor":5,"busID":"0001:20:00.5"},{"minor":6,"busID":"0001:20:00.6"},{"minor":7,"busID":"0001:20:00.7"},{"minor":8,"busID":"0001:20:00.8"},{"minor":9,"busID":"0001:20:00.9"},{"minor":10,"busID":"0001:20:00.a"},{"minor":11,"busID":"0001:20:00.b"},{"minor":12,"busID":"0001:20:00.c"},{"minor":13,"busID":"0001:20:00.d"},{"minor":14,"busID":"0001:20:00.e"},{"minor":15,"busID":"0001:20:00.f"},{"minor":16,"busID":"0001:20:00.10"},{"minor":17,"busID":"0001:20:00.11"},{"minor":18,"busID":"0001:20:00.12"},{"minor":19,"busID":"0001:20:00.13"},{"minor":20,"busID":"0001:20:00.14"},{"minor":21,"busID":"0001:20:00.15"},{"minor":22,"busID":"0001:20:00.16"},{"minor":23,"busID":"0001:20:00.17"},{"minor":24,"busID":"0001:20:00.18"},{"minor":25,"busID":"0001:20:00.19"},{"minor":26,"busID":"0001:20:00.1a"},{"minor":27,"busID":"0001:20:00.1b"},{"minor":28,"busID":"0001:20:00.1c"},{"minor":29,"busID":"0001:20:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0001:90:00.0","minor":6,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0001:21:00.0"},{"minor":1,"busID":"0001:21:00.1"},{"minor":2,"busID":"0001:21:00.2"},{"minor":3,"busID":"0001:21:00.3"},{"minor":4,"busID":"0001:21:00.4"},{"minor":5,"busID":"0001:21:00.5"},{"minor":6,"busID":"0001:21:00.6"},{"minor":7,"busID":"0001:21:00.7"},{"minor":8,"busID":"0001:21:00.8"},{"minor":9,"busID":"0001:21:00.9"},{"minor":10,"busID":"0001:21:00.a"},{"minor":11,"busID":"0001:21:00.b"},{"minor":12,"busID":"0001:21:00.c"},{"minor":13,"busID":"0001:21:00.d"},{"minor":14,"busID":"0001:21:00.e"},{"minor":15,"busID":"0001:21:00.f"},{"minor":16,"busID":"0001:21:00.10"},{"minor":17,"busID":"0001:21:00.11"},{"minor":18,"busID":"0001:21:00.12"},{"minor":19,"busID":"0001:21:00.13"},{"minor":20,"busID":"0001:21:00.14"},{"minor":21,"busID":"0001:21:00.15"},{"minor":22,"busID":"0001:21:00.16"},{"minor":23,"busID":"0001:21:00.17"},{"minor":24,"busID":"0001:21:00.18"},{"minor":25,"busID":"0001:21:00.19"},{"minor":26,"busID":"0001:21:00.1a"},{"minor":27,"busID":"0001:21:00.1b"},{"minor":28,"busID":"0001:21:00.1c"},{"minor":29,"busID":"0001:21:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0001:51:00.0","minor":7,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0001:22:00.0"},{"minor":1,"busID":"0001:22:00.1"},{"minor":2,"busID":"0001:22:00.2"},{"minor":3,"busID":"0001:22:00.3"},{"minor":4,"busID":"0001:22:00.4"},{"minor":5,"busID":"0001:22:00.5"},{"minor":6,"busID":"0001:22:00.6"},{"minor":7,"busID":"0001:22:00.7"},{"minor":8,"busID":"0001:22:00.8"},{"minor":9,"busID":"0001:22:00.9"},{"minor":10,"busID":"0001:22:00.a"},{"minor":11,"busID":"0001:22:00.b"},{"minor":12,"busID":"0001:22:00.c"},{"minor":13,"busID":"0001:22:00.d"},{"minor":14,"busID":"0001:22:00.e"},{"minor":15,"busID":"0001:22:00.f"},{"minor":16,"busID":"0001:22:00.10"},{"minor":17,"busID":"0001:22:00.11"},{"minor":18,"busID":"0001:22:00.12"},{"minor":19,"busID":"0001:22:00.13"},{"minor":20,"busID":"0001:22:00.14"},{"minor":21,"busID":"0001:22:00.15"},{"minor":22,"busID":"0001:22:00.16"},{"minor":23,"busID":"0001:22:00.17"},{"minor":24,"busID":"0001:22:00.18"},{"minor":25,"busID":"0001:22:00.19"},{"minor":26,"busID":"0001:22:00.1a"},{"minor":27,"busID":"0001:22:00.1b"},{"minor":28,"busID":"0001:22:00.1c"},{"minor":29,"busID":"0001:22:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0001:b9:00.0","minor":8,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0001:23:00.0"},{"minor":1,"busID":"0001:23:00.1"},{"minor":2,"busID":"0001:23:00.2"},{"minor":3,"busID":"0001:23:00.3"},{"minor":4,"busID":"0001:23:00.4"},{"minor":5,"busID":"0001:23:00.5"},{"minor":6,"busID":"0001:23:00.6"},{"minor":7,"busID":"0001:23:00.7"},{"minor":8,"busID":"0001:23:00.8"},{"minor":9,"busID":"0001:23:00.9"},{"minor":10,"busID":"0001:23:00.a"},{"minor":11,"busID":"0001:23:00.b"},{"minor":12,"busID":"0001:23:00.c"},{"minor":13,"busID":"0001:23:00.d"},{"minor":14,"busID":"0001:23:00.e"},{"minor":15,"busID":"0001:23:00.f"},{"minor":16,"busID":"0001:23:00.10"},{"minor":17,"busID":"0001:23:00.11"},{"minor":18,"busID":"0001:23:00.12"},{"minor":19,"busID":"0001:23:00.13"},{"minor":20,"busID":"0001:23:00.14"},{"minor":21,"busID":"0001:23:00.15"},{"minor":22,"busID":"0001:23:00.16"},{"minor":23,"busID":"0001:23:00.17"},{"minor":24,"busID":"0001:23:00.18"},{"minor":25,"busID":"0001:23:00.19"},{"minor":26,"busID":"0001:23:00.1a"},{"minor":27,"busID":"0001:23:00.1b"},{"minor":28,"busID":"0001:23:00.1c"},{"minor":29,"busID":"0001:23:00.1d"}]}]},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":1,"nodeID":1,"pcieID":"3"}}]},"status":{}}`)
+				var deviceCR schedulingv1alpha1.Device
+				_ = json.Unmarshal(data, &deviceCR)
+				return &deviceCR
+			}(),
+			gpuWanted:  4,
+			rdmaWanted: 4,
+			assignedDevices: apiext.DeviceAllocations{
+				schedulingv1alpha1.GPU: []*apiext.DeviceAllocation{
+					{
+						Minor:     0,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     1,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     2,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     3,
+						Resources: gpuResourceList,
+					},
+				},
+				schedulingv1alpha1.RDMA: []*apiext.DeviceAllocation{
+					{
+						Minor: 1,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:20:00.0",
+									Minor: 0,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: apiext.DeviceAllocations{
+				schedulingv1alpha1.GPU: []*apiext.DeviceAllocation{
+					{
+						Minor:     4,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     5,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     6,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     7,
+						Resources: gpuResourceList,
+					},
+				},
+				schedulingv1alpha1.RDMA: []*apiext.DeviceAllocation{
+					{
+						Minor: 3,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:22:00.0",
+									Minor: 0,
+								},
+							},
+						},
+					},
+					{
+						Minor: 4,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:23:00.0",
+									Minor: 0,
+								},
+							},
+						},
+					},
+					{
+						Minor: 7,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0001:22:00.0",
+									Minor: 0,
+								},
+							},
+						},
+					},
+					{
+						Minor: 8,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0001:23:00.0",
+									Minor: 0,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "1 RDMA with 1 GPU Per PCIE, but the first PCIE has multiple RDMA, requests 4 GPUs",
+			deviceCR: func() *schedulingv1alpha1.Device {
+				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":0,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:20:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:21:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:22:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:23:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:24:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":5,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:25:00.0"}]}]},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}}]},"status":{}}`)
+				var deviceCR schedulingv1alpha1.Device
+				_ = json.Unmarshal(data, &deviceCR)
+				return &deviceCR
+			}(),
+			gpuWanted:  4,
+			rdmaWanted: 4,
+			want: apiext.DeviceAllocations{
+				schedulingv1alpha1.GPU: []*apiext.DeviceAllocation{
+					{
+						Minor:     0,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     1,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     2,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     3,
+						Resources: gpuResourceList,
+					},
+				},
+				schedulingv1alpha1.RDMA: []*apiext.DeviceAllocation{
+					{
+						Minor: 0,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:20:00.0",
+									Minor: -1,
+								},
+							},
+						},
+					},
+					{
+						Minor: 3,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:23:00.0",
+									Minor: -1,
+								},
+							},
+						},
+					},
+					{
+						Minor: 4,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:24:00.0",
+									Minor: -1,
+								},
+							},
+						},
+					},
+					{
+						Minor: 5,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:25:00.0",
+									Minor: -1,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "1 GPU with hostNetwork and apply for all RDMAs",
 			deviceCR: func() *schedulingv1alpha1.Device {
-				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}}]},"status":{}}`)
+				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}}]},"status":{}}`)
 				var deviceCR schedulingv1alpha1.Device
 				_ = json.Unmarshal(data, &deviceCR)
 				return &deviceCR
@@ -862,12 +1102,59 @@ func TestAutopilotAllocator(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:                       "allocate 8 GPU and 4 VF; secondary device well planned",
+			deviceCR:                   fakeDeviceCR,
+			gpuWanted:                  8,
+			secondaryDeviceWellPlanned: true,
+			want: apiext.DeviceAllocations{
+				schedulingv1alpha1.GPU: []*apiext.DeviceAllocation{
+					{
+						Minor:     0,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     1,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     2,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     3,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     4,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     5,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     6,
+						Resources: gpuResourceList,
+					},
+					{
+						Minor:     7,
+						Resources: gpuResourceList,
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			deviceCR := tt.deviceCR.DeepCopy()
+			deviceCR.ResourceVersion = "1"
+			deviceCR.Labels = map[string]string{
+				apiext.LabelSecondaryDeviceWellPlanned: fmt.Sprintf("%t", tt.secondaryDeviceWellPlanned),
+			}
 			koordFakeClient := koordfake.NewSimpleClientset()
-			_, err := koordFakeClient.SchedulingV1alpha1().Devices().Create(context.TODO(), tt.deviceCR, metav1.CreateOptions{})
+			_, err := koordFakeClient.SchedulingV1alpha1().Devices().Create(context.TODO(), deviceCR, metav1.CreateOptions{})
 			assert.NoError(t, err)
 			koordShareInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordFakeClient, 0)
 
@@ -920,12 +1207,13 @@ func TestAutopilotAllocator(t *testing.T) {
 			podRequest := corev1.ResourceList{
 				apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 			}
+			if tt.rdmaWanted > 0 {
+				podRequest[apiext.ResourceRDMA] = *resource.NewQuantity(int64(100*tt.rdmaWanted), resource.DecimalSI)
+			}
+
 			if tt.gpuWanted > 0 {
 				podRequest[apiext.ResourceNvidiaGPU] = *resource.NewQuantity(int64(tt.gpuWanted), resource.DecimalSI)
 			}
-
-			nodeDevice.lock.Lock()
-			defer nodeDevice.lock.Unlock()
 
 			pod := &corev1.Pod{
 				Spec: corev1.PodSpec{
@@ -951,7 +1239,7 @@ func TestAutopilotAllocator(t *testing.T) {
 				}
 			}
 
-			state, status := preparePod(pod)
+			state, status := preparePod(pod, nil, nil)
 			assert.True(t, status.IsSuccess())
 
 			node := &corev1.Node{
@@ -974,6 +1262,7 @@ func TestAutopilotAllocator(t *testing.T) {
 			}
 			sortDeviceAllocations(allocations)
 			sortDeviceAllocations(tt.want)
+			fillGPUTotalMem(allocations, nodeDevice)
 			assert.Equal(t, tt.want, allocations)
 		})
 	}
@@ -1000,7 +1289,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1030,7 +1319,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1064,7 +1353,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1102,7 +1391,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1116,7 +1405,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 2,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1158,7 +1447,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1172,7 +1461,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 2,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1222,7 +1511,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1236,7 +1525,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 2,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1250,7 +1539,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 3,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1308,7 +1597,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1322,7 +1611,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 2,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1336,7 +1625,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 3,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1350,7 +1639,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 4,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1408,7 +1697,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 2,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1422,6 +1711,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 				},
 			},
 		},
+		// TODO 需要考虑这个场景真实存在么
 		{
 			name:            "allocate 3 GPU and 2 VF with assigned devices",
 			deviceCR:        fakeDeviceCR,
@@ -1451,57 +1741,12 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					},
 				},
 			},
-			want: apiext.DeviceAllocations{
-				schedulingv1alpha1.GPU: []*apiext.DeviceAllocation{
-					{
-						Minor:     4,
-						Resources: gpuResourceList,
-					},
-					{
-						Minor:     5,
-						Resources: gpuResourceList,
-					},
-					{
-						Minor:     6,
-						Resources: gpuResourceList,
-					},
-				},
-				schedulingv1alpha1.RDMA: []*apiext.DeviceAllocation{
-					{
-						Minor: 3,
-						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
-						},
-						Extension: &apiext.DeviceAllocationExtension{
-							VirtualFunctions: []apiext.VirtualFunction{
-								{
-									BusID: "0000:51:00.2",
-									Minor: 0,
-								},
-							},
-						},
-					},
-					{
-						Minor: 4,
-						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
-						},
-						Extension: &apiext.DeviceAllocationExtension{
-							VirtualFunctions: []apiext.VirtualFunction{
-								{
-									BusID: "0000:b9:00.2",
-									Minor: 0,
-								},
-							},
-						},
-					},
-				},
-			},
+			wantErr: true,
 		},
 		{
-			name: "Only 1 RDMA and 4 PCIE with 2 GPUs Per PCIE, allocate 4 GPUs",
+			name: "4 PCIE with 1 RDMA and 2 GPUs Per PCIE, allocate 4 GPUs",
 			deviceCR: func() *schedulingv1alpha1.Device {
-				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":0,"busID":"0000:20:00.0"},{"minor":1,"busID":"0000:20:00.1"},{"minor":2,"busID":"0000:20:00.2"},{"minor":3,"busID":"0000:20:00.3"},{"minor":4,"busID":"0000:20:00.4"},{"minor":5,"busID":"0000:20:00.5"},{"minor":6,"busID":"0000:20:00.6"},{"minor":7,"busID":"0000:20:00.7"},{"minor":8,"busID":"0000:20:00.8"},{"minor":9,"busID":"0000:20:00.9"},{"minor":10,"busID":"0000:20:00.a"},{"minor":11,"busID":"0000:20:00.b"},{"minor":12,"busID":"0000:20:00.c"},{"minor":13,"busID":"0000:20:00.d"},{"minor":14,"busID":"0000:20:00.e"},{"minor":15,"busID":"0000:20:00.f"},{"minor":16,"busID":"0000:20:00.10"},{"minor":17,"busID":"0000:20:00.11"},{"minor":18,"busID":"0000:20:00.12"},{"minor":19,"busID":"0000:20:00.13"},{"minor":20,"busID":"0000:20:00.14"},{"minor":21,"busID":"0000:20:00.15"},{"minor":22,"busID":"0000:20:00.16"},{"minor":23,"busID":"0000:20:00.17"},{"minor":24,"busID":"0000:20:00.18"},{"minor":25,"busID":"0000:20:00.19"},{"minor":26,"busID":"0000:20:00.1a"},{"minor":27,"busID":"0000:20:00.1b"},{"minor":28,"busID":"0000:20:00.1c"},{"minor":29,"busID":"0000:20:00.1d"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}}]},"status":{}}`)
+				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":0,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:20:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:21:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:22:00.0"}]}]},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"},"vfGroups":[{"labels":{"type":"general"},"vfs":[{"minor":-1,"busID":"0000:23:00.0"}]}]},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}}]},"status":{}}`)
 				var deviceCR schedulingv1alpha1.Device
 				_ = json.Unmarshal(data, &deviceCR)
 				return &deviceCR
@@ -1529,15 +1774,29 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 				},
 				schedulingv1alpha1.RDMA: []*apiext.DeviceAllocation{
 					{
-						Minor: 1,
+						Minor: 0,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
 								{
 									BusID: "0000:20:00.0",
-									Minor: 0,
+									Minor: -1,
+								},
+							},
+						},
+					},
+					{
+						Minor: 1,
+						Resources: corev1.ResourceList{
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
+						},
+						Extension: &apiext.DeviceAllocationExtension{
+							VirtualFunctions: []apiext.VirtualFunction{
+								{
+									BusID: "0000:21:00.0",
+									Minor: -1,
 								},
 							},
 						},
@@ -1614,7 +1873,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 3,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1628,7 +1887,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 4,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 						Extension: &apiext.DeviceAllocationExtension{
 							VirtualFunctions: []apiext.VirtualFunction{
@@ -1645,7 +1904,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 		{
 			name: "1 GPU with hostNetwork",
 			deviceCR: func() *schedulingv1alpha1.Device {
-				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":0}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":1}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":2}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":3}}]},"status":{}}`)
+				var data = []byte(`{"metadata":{"name":"test-node-1","creationTimestamp":null,"annotations":{}},"spec":{"devices":[{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:1f:00.0","minor":1,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:90:00.0","minor":2,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:51:00.0","minor":3,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"rdma","labels":{"type":"fakeW"},"id":"0000:b9:00.0","minor":4,"health":true,"resources":{"koordinator.sh/rdma":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-8c25ea37-2909-6e62-b7bf-e2fcadebea8d","minor":0,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-befd76c3-8a36-7b8a-179c-eae75aa7d9f2","minor":1,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"0"}},{"type":"gpu","id":"GPU-87a9047b-dade-e08c-c067-7fedfd2e2750","minor":2,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-44a68f77-c18d-85a6-5425-e314c0e8e182","minor":3,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"1"}},{"type":"gpu","id":"GPU-ac53dc25-2cb7-a11d-417f-ce23331dcea0","minor":4,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-3908dbfd-6e0b-013d-549b-fca246a16fa0","minor":5,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"2"}},{"type":"gpu","id":"GPU-7a87e98a-a1a7-28bc-c880-28c870bf0c7d","minor":6,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}},{"type":"gpu","id":"GPU-c3b7de0e-8a41-9bdb-3f71-8175c3438890","minor":7,"health":true,"resources":{"koordinator.sh/gpu-core":"100","koordinator.sh/gpu-memory":"83201216Ki","koordinator.sh/gpu-memory-ratio":"100"},"topology":{"socketID":0,"nodeID":0,"pcieID":"3"}}]},"status":{}}`)
 				var deviceCR schedulingv1alpha1.Device
 				_ = json.Unmarshal(data, &deviceCR)
 				return &deviceCR
@@ -1676,25 +1935,25 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 					{
 						Minor: 1,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 					},
 					{
 						Minor: 2,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 					},
 					{
 						Minor: 3,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 					},
 					{
 						Minor: 4,
 						Resources: corev1.ResourceList{
-							apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+							apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 						},
 					},
 				},
@@ -1704,8 +1963,9 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			deviceCR := tt.deviceCR.DeepCopy()
+			deviceCR.ResourceVersion = "1"
 			koordFakeClient := koordfake.NewSimpleClientset()
-			deviceCR := tt.deviceCR
 			_, err := koordFakeClient.SchedulingV1alpha1().Devices().Create(context.TODO(), deviceCR, metav1.CreateOptions{})
 			assert.NoError(t, err)
 			koordShareInformerFactory := koordinatorinformers.NewSharedInformerFactory(koordFakeClient, 0)
@@ -1757,14 +2017,11 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 			assert.NotNil(t, nodeDevice)
 
 			podRequest := corev1.ResourceList{
-				apiext.ResourceRDMA: *resource.NewQuantity(100, resource.DecimalSI),
+				apiext.ResourceRDMA: *resource.NewQuantity(1, resource.DecimalSI),
 			}
 			if tt.gpuWanted > 0 {
 				podRequest[apiext.ResourceNvidiaGPU] = *resource.NewQuantity(int64(tt.gpuWanted), resource.DecimalSI)
 			}
-
-			nodeDevice.lock.Lock()
-			defer nodeDevice.lock.Unlock()
 
 			pod := &corev1.Pod{
 				Spec: corev1.PodSpec{
@@ -1799,7 +2056,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 				}
 			}
 
-			state, status := preparePod(pod)
+			state, status := preparePod(pod, nil, nil)
 			assert.True(t, status.IsSuccess())
 
 			node := &corev1.Node{
@@ -1822,6 +2079,7 @@ func TestAutopilotAllocatorWithExclusivePolicyAndRequiredScope(t *testing.T) {
 			}
 			sortDeviceAllocations(allocations)
 			sortDeviceAllocations(tt.want)
+			fillGPUTotalMem(allocations, nodeDevice)
 			assert.Equal(t, tt.want, allocations)
 		})
 	}
@@ -1903,6 +2161,7 @@ func Test_allocateGPU(t *testing.T) {
 		podRequests:        podRequests,
 		preemptibleDevices: map[string]map[schedulingv1alpha1.DeviceType]deviceResources{"test-node": preemptible},
 	}
+	state.gpuRequirements, _ = parseGPURequirements(pod, state.podRequests, nil, nil, nil)
 	allocator := &AutopilotAllocator{
 		state:      state,
 		nodeDevice: nd,
@@ -1921,6 +2180,7 @@ func Test_allocateGPU(t *testing.T) {
 			},
 		},
 	}
+	assert.NoError(t, fillGPUTotalMem(allocateResult, nd))
 	assert.True(t, equality.Semantic.DeepEqual(expectAllocations, allocateResult[schedulingv1alpha1.GPU]))
 }
 
@@ -2000,6 +2260,7 @@ func Test_allocateGPUWithLeastAllocatedScorer(t *testing.T) {
 	state := &preFilterState{
 		podRequests: podRequests,
 	}
+	state.gpuRequirements, _ = parseGPURequirements(pod, state.podRequests, nil, nil, nil)
 	allocator := &AutopilotAllocator{
 		state:      state,
 		nodeDevice: nd,
@@ -2008,6 +2269,8 @@ func Test_allocateGPUWithLeastAllocatedScorer(t *testing.T) {
 		scorer:     allocationScorer,
 	}
 	allocateResult, status := allocator.Allocate(nil, nil, nil, nil)
+	err := fillGPUTotalMem(allocateResult, nd)
+	assert.NoError(t, err)
 	assert.True(t, status.IsSuccess())
 	expectAllocations := []*apiext.DeviceAllocation{
 		{
@@ -2098,6 +2361,7 @@ func Test_nodeDevice_allocateGPUWithMostAllocatedScorer(t *testing.T) {
 	state := &preFilterState{
 		podRequests: podRequests,
 	}
+	state.gpuRequirements, _ = parseGPURequirements(pod, state.podRequests, nil, nil, nil)
 	allocator := &AutopilotAllocator{
 		state:      state,
 		nodeDevice: nd,
@@ -2117,6 +2381,7 @@ func Test_nodeDevice_allocateGPUWithMostAllocatedScorer(t *testing.T) {
 			},
 		},
 	}
+	fillGPUTotalMem(allocateResult, nd)
 	assert.True(t, equality.Semantic.DeepEqual(expectAllocations, allocateResult[schedulingv1alpha1.GPU]))
 }
 
@@ -2197,6 +2462,7 @@ func Test_failedPreemptGPUFromReservation(t *testing.T) {
 		podRequests:        podRequests,
 		preemptibleDevices: map[string]map[schedulingv1alpha1.DeviceType]deviceResources{"test-node": preemptible},
 	}
+	state.gpuRequirements, _ = parseGPURequirements(pod, state.podRequests, nil, nil, nil)
 	allocator := &AutopilotAllocator{
 		state:      state,
 		nodeDevice: nd,
@@ -2244,6 +2510,7 @@ func Test_allocateGPUWithUnhealthyInstance(t *testing.T) {
 		node:       &corev1.Node{},
 		pod:        &corev1.Pod{},
 	}
+	state.gpuRequirements, _ = parseGPURequirements(allocator.pod, podRequests, nil, nil, nil)
 	allocateResult, status := allocator.Allocate(nil, nil, nil, nil)
 	assert.True(t, status.IsSuccess())
 	expectAllocations := []*apiext.DeviceAllocation{
@@ -2256,6 +2523,7 @@ func Test_allocateGPUWithUnhealthyInstance(t *testing.T) {
 			},
 		},
 	}
+	assert.NoError(t, fillGPUTotalMem(allocateResult, nd))
 	assert.True(t, equality.Semantic.DeepEqual(expectAllocations, allocateResult[schedulingv1alpha1.GPU]))
 }
 

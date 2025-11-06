@@ -164,8 +164,8 @@ func TestPlugin_OnQuotaUpdateAndDeleteWithTreeID(t *testing.T) {
 	plugin.OnQuotaUpdate(oldQuota, changeQuota)
 	quotaInfo := gqmA.GetQuotaInfoByName("test1-b")
 	gqmA.RefreshRuntime("test1-b")
-	assert.Equal(t, corev1.ResourceList{}, quotaInfo.GetRequest())
-	assert.Equal(t, corev1.ResourceList{}, quotaInfo.GetUsed())
+	assert.Equal(t, createResourceList(0, 0), quotaInfo.GetRequest())
+	assert.Equal(t, createResourceList(0, 0), quotaInfo.GetUsed())
 	assert.Equal(t, createResourceList(0, 0), quotaInfo.GetRuntime())
 
 	quotaInfo = gqmA.GetQuotaInfoByName("test1-a")
@@ -212,8 +212,8 @@ func TestPlugin_OnQuotaUpdateAndDeleteWithTreeID(t *testing.T) {
 
 	gqmA.RefreshRuntime("test1-b")
 	quotaInfo = gqmA.GetQuotaInfoByName("test1-b")
-	assert.Equal(t, corev1.ResourceList{}, quotaInfo.GetRequest())
-	assert.Equal(t, corev1.ResourceList{}, quotaInfo.GetUsed())
+	assert.Equal(t, createResourceList(0, 0), quotaInfo.GetRequest())
+	assert.Equal(t, createResourceList(0, 0), quotaInfo.GetUsed())
 	assert.Equal(t, createResourceList(0, 0), quotaInfo.GetRuntime())
 
 	quotaInfo = gqmA.GetQuotaInfoByName("test1")
@@ -332,4 +332,37 @@ func TestPlugin_HandlerQuotaWhenRoot(t *testing.T) {
 
 	plugin.OnQuotaDelete(copy)
 	assert.True(t, quotav1.Equals(createResourceList(300, 3000), plugin.groupQuotaManager.GetClusterTotalResource()))
+}
+
+func TestPlugin_ReplaceQuotas(t *testing.T) {
+	quotas := []interface{}{
+		CreateQuota2("test1", extension.RootQuotaName, 100, 200, 40, 80, 1, 1, true, ""),
+		CreateQuota2("test2", extension.RootQuotaName, 200, 400, 80, 160, 1, 1, true, ""),
+		CreateQuota2("test11", "test1", 100, 200, 40, 80, 1, 1, false, ""),
+	}
+
+	suit := newPluginTestSuit(t, nil)
+	p, err := suit.proxyNew(suit.elasticQuotaArgs, suit.Handle)
+	assert.Nil(t, err)
+	plugin := p.(*Plugin)
+
+	// ReplaceQuotas will conflict with QuotaEventHandler. sleep 1 seconds to avoid it.
+	time.Sleep(time.Second)
+	plugin.ReplaceQuotas(quotas)
+
+	plugin.groupQuotaManager.UpdateClusterTotalResource(createResourceList(1000, 1000))
+
+	// test11 request [40,100]
+	request1 := createResourceList(40, 100)
+	pod1 := makePod2("pod", request1)
+	pod1.Labels[extension.LabelQuotaName] = "test11"
+	plugin.OnPodAdd(pod1)
+	runtime := plugin.groupQuotaManager.RefreshRuntime("test11")
+	assert.Equal(t, request1, runtime)
+
+	runtime = plugin.groupQuotaManager.RefreshRuntime("test1")
+	assert.Equal(t, request1, runtime)
+
+	runtime = plugin.groupQuotaManager.RefreshRuntime("test2")
+	assert.Equal(t, createResourceList(0, 0), runtime)
 }

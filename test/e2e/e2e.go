@@ -21,18 +21,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/config"
-	"github.com/onsi/ginkgo/reporters"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
 	v1 "k8s.io/api/core/v1"
@@ -52,8 +48,6 @@ import (
 	e2emanifest "github.com/koordinator-sh/koordinator/test/e2e/framework/manifest"
 	e2enode "github.com/koordinator-sh/koordinator/test/e2e/framework/node"
 	e2epod "github.com/koordinator-sh/koordinator/test/e2e/framework/pod"
-	e2ereporters "github.com/koordinator-sh/koordinator/test/e2e/reporters"
-
 	// ensure auth plugins are loaded
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -97,29 +91,8 @@ func RunE2ETests(t *testing.T) {
 
 	gomega.RegisterFailHandler(framework.Fail)
 
-	// Run tests through the Ginkgo runner with output to console + JUnit for Jenkins
-	var r []ginkgo.Reporter
-	if framework.TestContext.ReportDir != "" {
-		// TODO: we should probably only be trying to create this directory once
-		// rather than once-per-Ginkgo-node.
-		if err := os.MkdirAll(framework.TestContext.ReportDir, 0755); err != nil {
-			klog.Errorf("Failed creating report directory: %v", err)
-		} else {
-			r = append(r, reporters.NewJUnitReporter(path.Join(framework.TestContext.ReportDir, fmt.Sprintf("junit_%v%02d.xml", framework.TestContext.ReportPrefix, config.GinkgoConfig.ParallelNode))))
-		}
-	}
-
-	// Stream the progress to stdout and optionally a URL accepting progress updates.
-	r = append(r, e2ereporters.NewProgressReporter(framework.TestContext.ProgressReportURL))
-
-	// The DetailsRepoerter will output details about every test (name, files, lines, etc) which helps
-	// when documenting our tests.
-	if len(framework.TestContext.SpecSummaryOutput) > 0 {
-		r = append(r, e2ereporters.NewDetailsReporterFile(framework.TestContext.SpecSummaryOutput))
-	}
-
-	klog.Infof("Starting e2e run %q on Ginkgo node %d", framework.RunID, config.GinkgoConfig.ParallelNode)
-	ginkgo.RunSpecsWithDefaultAndCustomReporters(t, "Kubernetes e2e suite", r)
+	klog.Infof("Starting e2e run %q", framework.RunID)
+	ginkgo.RunSpecs(t, "Kubernetes e2e suite")
 }
 
 // Run a test container to try and contact the Kubernetes api-server from a pod, wait for it
@@ -318,7 +291,7 @@ func logClusterImageSources() {
 
 	outputBytes, _ := json.MarshalIndent(images, "", "  ")
 	filePath := filepath.Join(framework.TestContext.ReportDir, "images.json")
-	if err := ioutil.WriteFile(filePath, outputBytes, 0644); err != nil {
+	if err := os.WriteFile(filePath, outputBytes, 0644); err != nil {
 		framework.Logf("cluster images sources, could not write to %q: %v", filePath, err)
 	}
 }

@@ -13,14 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           cache: false
           go-version-file: go.mod
       - run: sudo apt update && sudo apt install -y libpfm4 libpfm4-dev
-      - uses: golangci/golangci-lint-action@v3
+      - uses: golangci/golangci-lint-action@v5.3.0
         with:
-          version: v1.47.3
+          version: v1.55.2
+#          args: --out-format colored-line-number -v
 
   unit-tests:
     strategy:
@@ -52,11 +53,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
           cache: false
           go-version-file: go.mod
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -70,8 +71,11 @@ jobs:
           ${{ matrix.command }}
       - if: matrix.step == 'test'
         name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           flags: unittests
           file: cover.out
           fail_ci_if_error: true
@@ -82,7 +86,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ koordlet, koord-manager, koord-scheduler, koord-descheduler ]
+        target: [ koordlet, koord-manager, koord-scheduler, koord-descheduler, koord-device-daemon ]
     env:
       GITHUB_REG: ghcr.io
       ALIYUN_BJ_REG: registry.cn-beijing.aliyuncs.com

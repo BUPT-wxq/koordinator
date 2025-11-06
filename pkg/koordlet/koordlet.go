@@ -32,11 +32,13 @@ import (
 	clientsetbeta1 "github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned"
 	"github.com/koordinator-sh/koordinator/pkg/client/clientset/versioned/typed/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/config"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/extension"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metriccache"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metrics"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/metricsadvisor"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/prediction"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/qosmanager"
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/resourceexecutor"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/statesinformer"
 	statesinformerimpl "github.com/koordinator-sh/koordinator/pkg/koordlet/statesinformer/impl"
@@ -46,6 +48,8 @@ import (
 
 var (
 	scheme = apiruntime.NewScheme()
+
+	extensionControllerInitFuncs = map[string]extension.ControllerInitFunc{}
 )
 
 func init() {
@@ -63,6 +67,9 @@ type daemon struct {
 	qosManager     qosmanager.QOSManager
 	runtimeHook    runtimehooks.RuntimeHook
 	predictServer  prediction.PredictServer
+	executor       resourceexecutor.ResourceUpdateExecutor
+
+	extensionControllers []extension.Controller
 }
 
 func NewDaemon(config *config.Configuration) (Daemon, error) {
@@ -74,6 +81,7 @@ func NewDaemon(config *config.Configuration) (Daemon, error) {
 	klog.Infof("NODE_NAME is %v, start time %v", nodeName, float64(time.Now().Unix()))
 	metrics.RecordKoordletStartTime(nodeName, float64(time.Now().Unix()))
 
+	system.InitSupportConfigs()
 	klog.Infof("sysconf: %+v, agentMode: %v", system.Conf, system.AgentMode)
 	klog.Infof("kernel version INFO: %+v", system.HostSystemInfo)
 
@@ -103,9 +111,14 @@ func NewDaemon(config *config.Configuration) (Daemon, error) {
 
 	qosManager := qosmanager.NewQOSManager(config.QOSManagerConf, scheme, kubeClient, crdClient, nodeName, statesInformer, metricCache, config.CollectorConf, evictVersion)
 
-	runtimeHook, err := runtimehooks.NewRuntimeHook(statesInformer, config.RuntimeHookConf)
+	runtimeHook, err := runtimehooks.NewRuntimeHook(statesInformer, config.RuntimeHookConf, scheme, kubeClient, nodeName)
 	if err != nil {
 		return nil, err
+	}
+
+	extensionControllers := []extension.Controller{}
+	for _, initFunc := range extensionControllerInitFuncs {
+		extensionControllers = append(extensionControllers, initFunc(nodeName, kubeClient, statesInformer))
 	}
 
 	d := &daemon{
@@ -115,6 +128,9 @@ func NewDaemon(config *config.Configuration) (Daemon, error) {
 		qosManager:     qosManager,
 		runtimeHook:    runtimeHook,
 		predictServer:  predictServer,
+		executor:       resourceexecutor.NewResourceUpdateExecutor(),
+
+		extensionControllers: extensionControllers,
 	}
 
 	return d, nil
@@ -123,6 +139,9 @@ func NewDaemon(config *config.Configuration) (Daemon, error) {
 func (d *daemon) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	klog.Infof("Starting daemon")
+
+	// start resource executor cache
+	d.executor.Run(stopCh)
 
 	go func() {
 		if err := d.metricCache.Run(stopCh); err != nil {
@@ -147,7 +166,6 @@ func (d *daemon) Run(stopCh <-chan struct{}) {
 			klog.Fatal("Unable to run the metric advisor: ", err)
 		}
 	}()
-
 	// wait for metric advisor sync
 	if !cache.WaitForCacheSync(stopCh, d.metricAdvisor.HasSynced) {
 		klog.Fatal("time out waiting for metric advisor to sync")
@@ -175,6 +193,16 @@ func (d *daemon) Run(stopCh <-chan struct{}) {
 			klog.Fatal("Unable to run the runtimeHook: ", err)
 		}
 	}()
+
+	for _, c := range d.extensionControllers {
+		go func(controller extension.Controller) {
+			name := controller.Name()
+			klog.Infof("starting extension controller %v", name)
+			if err := controller.Run(stopCh); err != nil {
+				klog.Fatalf("Unable to start the extension controller %v, err: %v", name, err)
+			}
+		}(c)
+	}
 
 	klog.Info("Start daemon successfully")
 	<-stopCh

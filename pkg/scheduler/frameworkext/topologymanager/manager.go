@@ -24,10 +24,16 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/schedulingphase"
+)
+
+const (
+	ErrUnsatisfiedNUMAResource = "Unsatisfied NUMA %s"
+	ErrNUMAHintCannotAligned   = "Unaligned NUMA Hint cause %v"
 )
 
 type Interface interface {
-	Admit(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string, numaNodes []int, policyType apiext.NUMATopologyPolicy) *framework.Status
+	Admit(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string, numaNodes []int, policyType apiext.NUMATopologyPolicy, exclusivePolicy apiext.NumaTopologyExclusive, allNUMANodeStatus []apiext.NumaNodeStatus) *framework.Status
 }
 
 type NUMATopologyHintProvider interface {
@@ -55,7 +61,7 @@ func New(hintProviderFactory NUMATopologyHintProviderFactory) Interface {
 	}
 }
 
-func (m *topologyManager) Admit(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string, numaNodes []int, policyType apiext.NUMATopologyPolicy) *framework.Status {
+func (m *topologyManager) Admit(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string, numaNodes []int, policyType apiext.NUMATopologyPolicy, exclusivePolicy apiext.NumaTopologyExclusive, allNUMANodeStatus []apiext.NumaNodeStatus) *framework.Status {
 	s, err := cycleState.Read(affinityStateKey)
 	if err != nil {
 		return framework.AsStatus(err)
@@ -63,40 +69,63 @@ func (m *topologyManager) Admit(ctx context.Context, cycleState *framework.Cycle
 	store := s.(*Store)
 
 	policy := createNUMATopologyPolicy(policyType, numaNodes)
-
-	bestHint, admit := m.calculateAffinity(ctx, cycleState, policy, pod, nodeName)
-	klog.V(5).Infof("Best TopologyHint for (pod: %v): %v on node: %v", klog.KObj(pod), bestHint, nodeName)
-	if !admit {
-		return framework.NewStatus(framework.Unschedulable, "node(s) NUMA Topology affinity error")
-	}
-
-	store.SetAffinity(nodeName, bestHint)
-
-	status := m.allocateResources(ctx, cycleState, bestHint, pod, nodeName)
-	if !status.IsSuccess() {
-		return status
+	bestHint, ok := store.GetAffinity(nodeName)
+	extensionPointBeingExecuted := schedulingphase.GetExtensionPointBeingExecuted(cycleState)
+	klog.V(5).Infof("extensionPointBeingExecuted: %v, bestHint: %v, nodeName: %v, pod: %v", extensionPointBeingExecuted, bestHint, nodeName, pod.Name)
+	if !ok || extensionPointBeingExecuted == schedulingphase.PostFilter {
+		bestHint, admit, reasons := m.calculateAffinity(ctx, cycleState, policy, pod, nodeName, exclusivePolicy, allNUMANodeStatus)
+		klog.V(4).Infof("Best TopologyHint for (pod: %v): %+v on node %s, policy %T, exclusivePolicy %s, admit %v, reasons %v",
+			klog.KObj(pod), bestHint, nodeName, policy, exclusivePolicy, admit, reasons)
+		if !admit {
+			if len(reasons) != 0 {
+				return framework.NewStatus(framework.Unschedulable, reasons...)
+			}
+		}
+		// TODO 如果上面的 Affinity 确认可以分配出来，这里看起来没必要再调用了
+		status := m.allocateResources(ctx, cycleState, bestHint, pod, nodeName)
+		if !status.IsSuccess() {
+			return status
+		}
+		store.SetAffinity(nodeName, bestHint)
+	} else {
+		status := m.allocateResources(ctx, cycleState, bestHint, pod, nodeName)
+		if !status.IsSuccess() {
+			return status
+		}
 	}
 	return nil
 }
 
-func (m *topologyManager) calculateAffinity(ctx context.Context, cycleState *framework.CycleState, policy Policy, pod *corev1.Pod, nodeName string) (NUMATopologyHint, bool) {
-	providersHints := m.accumulateProvidersHints(ctx, cycleState, pod, nodeName)
-	bestHint, admit := policy.Merge(providersHints)
+func (m *topologyManager) calculateAffinity(ctx context.Context, cycleState *framework.CycleState, policy Policy, pod *corev1.Pod, nodeName string, exclusivePolicy apiext.NumaTopologyExclusive, allNUMANodeStatus []apiext.NumaNodeStatus) (NUMATopologyHint, bool, []string) {
+	providersHints, reasons := m.accumulateProvidersHints(ctx, cycleState, pod, nodeName)
+	if len(reasons) != 0 {
+		return NUMATopologyHint{}, false, reasons
+	}
+	bestHint, admit, reasons := policy.Merge(providersHints, exclusivePolicy, allNUMANodeStatus)
+	if !checkExclusivePolicy(bestHint, exclusivePolicy, allNUMANodeStatus) {
+		klog.V(5).Infof("bestHint violated the exclusivePolicy requirement: bestHint: %v, policy: %v, numaStatus: %v, nodeName: %v, pod: %v",
+			bestHint, exclusivePolicy, allNUMANodeStatus, nodeName, pod.Name)
+	}
 	klog.V(5).Infof("PodTopologyHint: %v", bestHint)
-	return bestHint, admit
+	return bestHint, admit, reasons
 }
 
-func (m *topologyManager) accumulateProvidersHints(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string) []map[string][]NUMATopologyHint {
+func (m *topologyManager) accumulateProvidersHints(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string) ([]map[string][]NUMATopologyHint, []string) {
 	var providersHints []map[string][]NUMATopologyHint
 
 	hintProviders := m.hintProviderFactory.GetNUMATopologyHintProvider()
+	var reasons []string
 	for _, provider := range hintProviders {
 		// Get the TopologyHints for a Pod from a provider.
-		hints, _ := provider.GetPodTopologyHints(ctx, cycleState, pod, nodeName)
+		hints, status := provider.GetPodTopologyHints(ctx, cycleState, pod, nodeName)
+		if !status.IsSuccess() {
+			reasons = append(reasons, status.Message())
+			continue
+		}
 		providersHints = append(providersHints, hints)
-		klog.V(5).Infof("TopologyHints for pod '%v': %v on node: %v", klog.KObj(pod), hints, nodeName)
+		klog.V(4).Infof("TopologyHints for pod '%v' by provider %T: %+v on node: %v, status: %s/%s", klog.KObj(pod), provider, hints, nodeName, status.Code(), status.Message())
 	}
-	return providersHints
+	return providersHints, reasons
 }
 
 func (m *topologyManager) allocateResources(ctx context.Context, cycleState *framework.CycleState, affinity NUMATopologyHint, pod *corev1.Pod, nodeName string) *framework.Status {

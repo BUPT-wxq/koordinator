@@ -21,13 +21,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/koordinator-sh/koordinator/pkg/webhook/metrics"
+)
+
+const (
+	ClusterColocationProfile = "ClusterColocationProfile"
+	ExtendedResourceSpec     = "ExtendedResourceSpec"
+	MultiQuotaTree           = "MultiQuotaTree"
+	DeviceResourceSpec       = "DeviceResourceSpec"
 )
 
 // PodMutatingHandler handles Pod
@@ -94,19 +103,53 @@ func (h *PodMutatingHandler) Handle(ctx context.Context, req admission.Request) 
 		klog.Errorf("Failed to marshal mutated Pod %s/%s, err: %v", obj.Namespace, obj.Name, err)
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-	return admission.PatchResponseFromRaw(req.AdmissionRequest.Object.Raw, marshaled)
+	original, err := json.Marshal(clone)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	return admission.PatchResponseFromRaw(original, marshaled)
 }
 
 func (h *PodMutatingHandler) handleCreate(ctx context.Context, req admission.Request, obj *corev1.Pod) error {
+	start := time.Now()
 	if err := h.clusterColocationProfileMutatingPod(ctx, req, obj); err != nil {
 		klog.Errorf("Failed to mutating Pod %s/%s by ClusterColocationProfile, err: %v", obj.Namespace, obj.Name, err)
+		metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+			metrics.Pod, string(req.Operation), err, ClusterColocationProfile, time.Since(start).Seconds())
 		return err
 	}
+	metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+		metrics.Pod, string(req.Operation), nil, ClusterColocationProfile, time.Since(start).Seconds())
 
+	start = time.Now()
 	if err := h.extendedResourceSpecMutatingPod(ctx, req, obj); err != nil {
 		klog.Errorf("Failed to mutating Pod %s/%s by ExtendedResourceSpec, err: %v", obj.Namespace, obj.Name, err)
+		metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+			metrics.Pod, string(req.Operation), err, ExtendedResourceSpec, time.Since(start).Seconds())
 		return err
 	}
+	metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+		metrics.Pod, string(req.Operation), nil, ExtendedResourceSpec, time.Since(start).Seconds())
+
+	start = time.Now()
+	if err := h.addNodeAffinityForMultiQuotaTree(ctx, req, obj); err != nil {
+		klog.Errorf("Failed to mutating Pod %s/%s by MultiQuotaTree, err: %v", obj.Namespace, obj.Name, err)
+		metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+			metrics.Pod, string(req.Operation), err, MultiQuotaTree, time.Since(start).Seconds())
+		return err
+	}
+	metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+		metrics.Pod, string(req.Operation), nil, MultiQuotaTree, time.Since(start).Seconds())
+
+	start = time.Now()
+	if err := h.deviceResourceSpecMutatingPod(ctx, req, obj); err != nil {
+		klog.Errorf("Failed to mutating Pod %s/%s by DeviceResourceSpec, err: %v", obj.Namespace, obj.Name, err)
+		metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+			metrics.Pod, string(req.Operation), err, DeviceResourceSpec, time.Since(start).Seconds())
+		return err
+	}
+	metrics.RecordWebhookDurationMilliseconds(metrics.MutatingWebhook,
+		metrics.Pod, string(req.Operation), nil, DeviceResourceSpec, time.Since(start).Seconds())
 
 	return nil
 }
@@ -116,7 +159,7 @@ func (h *PodMutatingHandler) handleUpdate(ctx context.Context, req admission.Req
 	return nil
 }
 
-var _ inject.Client = &PodMutatingHandler{}
+// var _ inject.Client = &PodMutatingHandler{}
 
 // InjectClient injects the client into the PodMutatingHandler
 func (h *PodMutatingHandler) InjectClient(c client.Client) error {
@@ -124,7 +167,7 @@ func (h *PodMutatingHandler) InjectClient(c client.Client) error {
 	return nil
 }
 
-var _ admission.DecoderInjector = &PodMutatingHandler{}
+// var _ admission.DecoderInjector = &PodMutatingHandler{}
 
 // InjectDecoder injects the decoder into the PodMutatingHandler
 func (h *PodMutatingHandler) InjectDecoder(d *admission.Decoder) error {

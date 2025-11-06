@@ -19,6 +19,7 @@ package config
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	schedconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
@@ -37,15 +38,23 @@ type LoadAwareSchedulingArgs struct {
 	// When NodeMetrics expired, the node is considered abnormal.
 	// Default is 180 seconds.
 	NodeMetricExpirationSeconds *int64
+	// EnableScheduleWhenNodeMetricsExpired Indicates whether nodes with expired nodeMetrics are allowed to schedule pods.
+	EnableScheduleWhenNodeMetricsExpired *bool
 	// ResourceWeights indicates the weights of resources.
 	// The weights of CPU and Memory are both 1 by default.
 	ResourceWeights map[corev1.ResourceName]int64
+	// DominantResourceWeight indicates the weight of the dominant resource.
+	// Dominant resource is the resource with the maximum utilization, which is based on the concept of Dominant Resource Fairness.
+	DominantResourceWeight int64
 	// UsageThresholds indicates the resource utilization threshold of the whole machine.
 	// The default for CPU is 65%, and the default for memory is 95%.
 	UsageThresholds map[corev1.ResourceName]int64
 	// ProdUsageThresholds indicates the resource utilization threshold of Prod Pods compared to the whole machine.
 	// Not enabled by default
 	ProdUsageThresholds map[corev1.ResourceName]int64
+	// ProdUsageIncludeSys indicates whether to include system usage (not used by pods)
+	// when summing up current usage for prod pods.
+	ProdUsageIncludeSys bool
 	// ScoreAccordingProdUsage controls whether to score according to the utilization of Prod Pod
 	ScoreAccordingProdUsage bool
 	// Estimator indicates the expected Estimator to use
@@ -53,8 +62,24 @@ type LoadAwareSchedulingArgs struct {
 	// EstimatedScalingFactors indicates the factor when estimating resource usage.
 	// The default value of CPU is 85%, and the default value of Memory is 70%.
 	EstimatedScalingFactors map[corev1.ResourceName]int64
+	// EstimatedSecondsAfterPodScheduled indicates the force estimation duration
+	// after pod condition PodScheduled transition to True in seconds.
+	EstimatedSecondsAfterPodScheduled *int64
+	// EstimatedSecondsAfterInitialized indicates the force estimation duration
+	// after pod condition Initialized transition to True in seconds.
+	EstimatedSecondsAfterInitialized *int64
+	// AllowCustomizeEstimation indicates whether to allow reading estimation args from pod's metadata.
+	AllowCustomizeEstimation bool
 	// Aggregated supports resource utilization filtering and scoring based on percentile statistics
 	Aggregated *LoadAwareSchedulingAggregatedArgs
+	// SupportedResourceNames is the list of extra resource names that can be used in load-aware scheduling.
+	// cpu, memory and all other resources that show up in args are supported by default.
+	//
+	// If more resource are added in collection, don't show up as
+	// filter thresholds or score weights in plugin args
+	// and only set up in custom node annotations,
+	// we should pass these resource names in plugin args explicitly.
+	SupportedResources []corev1.ResourceName
 }
 
 type LoadAwareSchedulingAggregatedArgs struct {
@@ -157,7 +182,27 @@ type ReservationArgs struct {
 	metav1.TypeMeta
 
 	// EnablePreemption indicates whether to enable preemption for reservations.
-	EnablePreemption *bool
+	EnablePreemption bool
+	// MinCandidateNodesPercentage is the minimum number of candidates to
+	// shortlist when dry running preemption as a percentage of number of nodes.
+	// Must be in the range [0, 100]. Defaults to 10% of the cluster size if
+	// unspecified.
+	MinCandidateNodesPercentage int32
+	// MinCandidateNodesAbsolute is the absolute minimum number of candidates to
+	// shortlist. The likely number of candidates enumerated for dry running
+	// preemption is given by the formula:
+	// numCandidates = max(numNodes * minCandidateNodesPercentage, minCandidateNodesAbsolute)
+	// We say "likely" because there are other factors such as PDB violations
+	// that play a role in the number of candidates shortlisted. Must be at least
+	// 0 nodes. Defaults to 100 nodes if unspecified.
+	MinCandidateNodesAbsolute int32
+	// Workers number of reservation controller.
+	// Defaults to 1 if unspecified.
+	ControllerWorkers int32
+	// GCDurationSeconds is the duration in seconds after which expired or succeeded reservations
+	// will be garbage collected. Defaults to 24 hours (86400 seconds) if unspecified.
+	// This value should be provided in seconds.
+	GCDurationSeconds int64
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -167,10 +212,10 @@ type ElasticQuotaArgs struct {
 	metav1.TypeMeta
 
 	// DelayEvictTime is the duration to handle the jitter of used and runtime
-	DelayEvictTime *metav1.Duration
+	DelayEvictTime metav1.Duration
 
 	// RevokePodInterval is the interval to check quotaGroup's used and runtime
-	RevokePodInterval *metav1.Duration
+	RevokePodInterval metav1.Duration
 
 	// DefaultQuotaGroupMax limit the maxQuota of DefaultQuotaGroup
 	DefaultQuotaGroupMax corev1.ResourceList
@@ -182,10 +227,34 @@ type ElasticQuotaArgs struct {
 	QuotaGroupNamespace string
 
 	// MonitorAllQuotas monitor the quotaGroups' used and runtime Quota to revoke pods
-	MonitorAllQuotas *bool
+	MonitorAllQuotas bool
 
 	// EnableCheckParentQuota check parentQuotaGroups' used and runtime Quota in PreFilter
-	EnableCheckParentQuota *bool
+	EnableCheckParentQuota bool
+
+	// EnableRuntimeQuota if false, use max instead of runtime for all checks.
+	EnableRuntimeQuota bool
+
+	// EnableMinQuotaScale if true, min will be scaled when minQuotaSum > totalRes.
+	EnableMinQuotaScale bool
+
+	// DisableDefaultQuotaPreemption if true, will not preempt pods in default quota.
+	DisableDefaultQuotaPreemption bool
+
+	// HookPlugins is expected to be configured with enabled hook plugins
+	HookPlugins []HookPluginConf
+}
+
+// HookPluginConf define configuration for a single hook plugin
+type HookPluginConf struct {
+	// Key is the key of the hook plugin
+	Key string
+
+	// FactoryKey is the key of the hook plugin factory
+	FactoryKey string
+
+	// FactoryArgs is the arguments of the hook plugin factory
+	FactoryArgs string
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -196,13 +265,19 @@ type CoschedulingArgs struct {
 
 	// DefaultTimeout is the default gang's waiting time in Permit stage
 	// default is 600 seconds
-	DefaultTimeout *metav1.Duration
+	DefaultTimeout metav1.Duration
 	// Workers number of controller
 	// default is 1
-	ControllerWorkers *int64
-	// Skip check schedule cycle
+	ControllerWorkers int64
+	// Skip check schedule cycle [Deprecated]
 	// default is false
 	SkipCheckScheduleCycle bool
+	// EnablePreemption indicates whether to enable preemption for coscheduling.
+	// default is false
+	EnablePreemption *bool `json:"enablePreemption,omitempty"`
+	// AwareNetworkTopology indicates whether to make coscheduling network topology aware.
+	// default is false
+	AwareNetworkTopology *bool `json:"awareNetworkTopology,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -212,7 +287,44 @@ type DeviceShareArgs struct {
 	metav1.TypeMeta
 
 	// Allocator indicates the expected allocator to use
+	// Deprecated: Adapting to different allocators is no longer supported.
 	Allocator string
 	// ScoringStrategy selects the device resource scoring strategy.
 	ScoringStrategy *ScoringStrategy
+	// DisableDeviceNUMATopologyAlignment indicates device don't need to align with other resources' numa topology
+	DisableDeviceNUMATopologyAlignment bool
+	// GPUSharedResourceTemplatesConfig holds configurations for GPU shared resource templates.
+	GPUSharedResourceTemplatesConfig *GPUSharedResourceTemplatesConfig
+}
+
+type GPUSharedResourceTemplatesConfig struct {
+	// ConfigMapNamespace is the namespace of the ConfigMap holding GPU shared resource templates data.
+	ConfigMapNamespace string
+	// ConfigMapName is the name of the ConfigMap holding GPU shared resource templates data.
+	ConfigMapName string
+	// MatchedResources are resources matched for GPU shared resource templates.
+	// If a GPU shared pod requests any of the matched resources,
+	// all of its requested GPU resources would be matched for GPU shared resource templates.
+	MatchedResources []corev1.ResourceName
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// ScarceResourceAvoidanceArgs defines the parameters for ScarceResourceAvoidance plugin.
+type ScarceResourceAvoidanceArgs struct {
+	metav1.TypeMeta
+	Resources []corev1.ResourceName
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// NodeResourcesFitPlusArgs defines the parameters for NodeResourcesFitPlus plugin.
+type NodeResourcesFitPlusArgs struct {
+	metav1.TypeMeta
+	Resources map[corev1.ResourceName]ResourcesType
+}
+
+type ResourcesType struct {
+	Type   config.ScoringStrategyType
+	Weight int64
 }

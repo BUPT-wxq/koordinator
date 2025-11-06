@@ -19,6 +19,8 @@ package topologymanager
 
 import (
 	"testing"
+
+	apiext "github.com/koordinator-sh/koordinator/apis/extension"
 )
 
 func TestPolicyNoneName(t *testing.T) {
@@ -47,12 +49,12 @@ func TestPolicyNoneCanAdmitPodResult(t *testing.T) {
 	}{
 		{
 			name:     "Preferred is set to false in topology hints",
-			hint:     NUMATopologyHint{nil, false, 0},
+			hint:     NUMATopologyHint{nil, false, false, 0},
 			expected: true,
 		},
 		{
 			name:     "Preferred is set to true in topology hints",
-			hint:     NUMATopologyHint{nil, true, 0},
+			hint:     NUMATopologyHint{nil, false, true, 0},
 			expected: true,
 		},
 	}
@@ -104,7 +106,7 @@ func TestPolicyNoneMerge(t *testing.T) {
 
 	for _, tc := range tcases {
 		policy := NewNonePolicy()
-		result, admit := policy.Merge(tc.providersHints)
+		result, admit, _ := policy.Merge(tc.providersHints, apiext.NumaTopologyExclusivePreferred, []apiext.NumaNodeStatus{})
 		if !result.IsEqual(tc.expectedHint) || admit != tc.expectedAdmit {
 			t.Errorf("Test Case: %s: Expected merge hint to be %v, got %v", tc.name, tc.expectedHint, result)
 		}

@@ -36,16 +36,22 @@ const (
 	// ElasticQuotaValidatingWebhook enables validating webhook for ElasticQuotas creations or updates
 	ElasticQuotaValidatingWebhook featuregate.Feature = "ElasticValidatingWebhook"
 
+	// NodeMutatingWebhook enables mutating webhook for Node Creation or updates
+	NodeMutatingWebhook featuregate.Feature = "NodeMutatingWebhook"
+
 	// NodeValidatingWebhook enables validating webhook for Node Creation or updates
 	NodeValidatingWebhook featuregate.Feature = "NodeValidatingWebhook"
 
 	// ConfigMapValidatingWebhook enables validating webhook for configmap Creation or updates
 	ConfigMapValidatingWebhook featuregate.Feature = "ConfigMapValidatingWebhook"
 
+	// ReservationMutatingWebhook enables mutating webhook for Reservations creations.
+	ReservationMutatingWebhook featuregate.Feature = "ReservationMutatingWebhook"
+
 	// ColocationProfileSkipMutatingResources config whether to update resourceName according to priority by default
 	ColocationProfileSkipMutatingResources featuregate.Feature = "ColocationProfileSkipMutatingResources"
 
-	// WebhookFramework enables webhook framework
+	// WebhookFramework enables webhook framework, global feature-gate for webhook
 	WebhookFramework featuregate.Feature = "WebhookFramework"
 
 	// MultiQuotaTree enables multi quota tree.
@@ -54,13 +60,42 @@ const (
 	// ElasticQuotaIgnorePodOverhead ignore pod.spec.overhead when accounting pod requests
 	ElasticQuotaIgnorePodOverhead featuregate.Feature = "ElasticQuotaIgnorePodOverhead"
 
+	// ElasticQuotaIgnoreTerminatingPod ignore the terminating pod.
+	ElasticQuotaIgnoreTerminatingPod featuregate.Feature = "ElasticQuotaIgnoreTerminatingPod"
+
+	// ElasticQuotaImmediateIgnoreTerminatingPod ignore the terminating pod immediately.
+	ElasticQuotaImmediateIgnoreTerminatingPod featuregate.Feature = "ElasticQuotaImmediateIgnoreTerminatingPod"
+
 	// ElasticQuotaGuaranteeUsage enable guarantee the quota usage
 	// In some specific scenarios, resources that have been allocated to users are considered
 	// to belong to the users and will not be preempted back.
 	ElasticQuotaGuaranteeUsage featuregate.Feature = "ElasticQuotaGuaranteeUsage"
 
+	// ElasticQuotaEnableUpdateResourceKey allows to update resource key in standard operation
+	// when delete resource type: from child to parent
+	// when add resource type: from parent to child
+	ElasticQuotaEnableUpdateResourceKey featuregate.Feature = "ElasticQuotaEnableUpdateResourceKey"
+
 	// DisableDefaultQuota disable default quota.
 	DisableDefaultQuota featuregate.Feature = "DisableDefaultQuota"
+
+	// SupportParentQuotaSubmitPod enables parent Quota submit pod
+	SupportParentQuotaSubmitPod featuregate.Feature = "SupportParentQuotaSubmitPod"
+
+	// EnableQuotaAdmission enables quota admission.
+	EnableQuotaAdmission featuregate.Feature = "EnableQuotaAdmission"
+
+	// EnablePodEnhancedValidator enables enhanced validator for pods with configurable rules.
+	EnablePodEnhancedValidator featuregate.Feature = "EnablePodEnhancedValidator"
+
+	// Enable sync GPU shared resource from Device CRD
+	EnableSyncGPUSharedResource featuregate.Feature = "EnableSyncGPUSharedResource"
+
+	// ColocationProfileController enables the reconciliation for ClusterColocationProfile.
+	ColocationProfileController featuregate.Feature = "ColocationProfileController"
+
+	// ValidatePodDeviceResource enables validate pod device resource
+	ValidatePodDeviceResource featuregate.Feature = "ValidatePodDeviceResource"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -68,14 +103,23 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	PodValidatingWebhook:                   {Default: true, PreRelease: featuregate.Beta},
 	ElasticQuotaMutatingWebhook:            {Default: true, PreRelease: featuregate.Beta},
 	ElasticQuotaValidatingWebhook:          {Default: true, PreRelease: featuregate.Beta},
+	NodeMutatingWebhook:                    {Default: false, PreRelease: featuregate.Alpha},
 	NodeValidatingWebhook:                  {Default: false, PreRelease: featuregate.Alpha},
 	ConfigMapValidatingWebhook:             {Default: false, PreRelease: featuregate.Alpha},
+	ReservationMutatingWebhook:             {Default: false, PreRelease: featuregate.Alpha},
 	WebhookFramework:                       {Default: true, PreRelease: featuregate.Beta},
 	ColocationProfileSkipMutatingResources: {Default: false, PreRelease: featuregate.Alpha},
 	MultiQuotaTree:                         {Default: false, PreRelease: featuregate.Alpha},
 	ElasticQuotaIgnorePodOverhead:          {Default: false, PreRelease: featuregate.Alpha},
 	ElasticQuotaGuaranteeUsage:             {Default: false, PreRelease: featuregate.Alpha},
+	ElasticQuotaEnableUpdateResourceKey:    {Default: false, PreRelease: featuregate.Alpha},
 	DisableDefaultQuota:                    {Default: false, PreRelease: featuregate.Alpha},
+	SupportParentQuotaSubmitPod:            {Default: false, PreRelease: featuregate.Alpha},
+	EnableQuotaAdmission:                   {Default: false, PreRelease: featuregate.Alpha},
+	EnableSyncGPUSharedResource:            {Default: false, PreRelease: featuregate.Alpha},
+	ColocationProfileController:            {Default: false, PreRelease: featuregate.Alpha},
+	ValidatePodDeviceResource:              {Default: false, PreRelease: featuregate.Alpha},
+	EnablePodEnhancedValidator:             {Default: false, PreRelease: featuregate.Alpha},
 }
 
 const (
@@ -86,9 +130,25 @@ var defaultDeschedulerFeatureGates = map[featuregate.Feature]featuregate.Feature
 	DisablePVCReservation: {Default: false, PreRelease: featuregate.Beta},
 }
 
+const (
+	// PriorityTransformer is used to map the pod priority to priority classes defined by Koordinator.
+	// If a pod does not set a priorityClass, it will be mapped to the DefaultPriorityClass.
+	PriorityTransformer featuregate.Feature = "PriorityTransformer"
+	// PreemptionPolicyTransformer is used to take over the pod preemption policy with the specified label.
+	// If a pod does not set a preemptionPolicy, it will be mapped to the DefaultPreemptionPolicy.
+	PreemptionPolicyTransformer featuregate.Feature = "PreemptionPolicyTransformer"
+)
+
+var transformerFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+	PriorityTransformer:         {Default: false, PreRelease: featuregate.Alpha},
+	PreemptionPolicyTransformer: {Default: false, PreRelease: featuregate.Alpha},
+}
+
 func init() {
 	runtime.Must(utilfeature.DefaultMutableFeatureGate.Add(defaultFeatureGates))
 	runtime.Must(utilfeature.DefaultMutableFeatureGate.Add(defaultDeschedulerFeatureGates))
+	// TODO: use a unified feature-gate
+	runtime.Must(utilfeature.DefaultMutableFeatureGate.Add(transformerFeatureGates))
 }
 
 func SetDefaultFeatureGates() {

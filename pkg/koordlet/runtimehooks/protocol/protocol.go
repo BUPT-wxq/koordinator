@@ -20,6 +20,7 @@ import (
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/api/v1/resource"
 
 	slov1alpha1 "github.com/koordinator-sh/koordinator/apis/slo/v1alpha1"
@@ -33,6 +34,7 @@ type HooksProtocol interface {
 	ReconcilerDone(executor resourceexecutor.ResourceUpdateExecutor)
 	Update()
 	GetUpdaters() []resourceexecutor.ResourceUpdater
+	RecordEvent(r record.EventRecorder, pod *corev1.Pod)
 }
 
 type hooksProtocolBuilder struct {
@@ -71,15 +73,24 @@ var HooksProtocolBuilder = hooksProtocolBuilder{
 	},
 }
 
+type Resctrl struct {
+	Schemata   string
+	Closid     string
+	NewTaskIds []int32
+}
+
 type Resources struct {
 	// origin resources
-	CPUShares   *int64
-	CFSQuota    *int64
-	CPUSet      *string
-	MemoryLimit *int64
+	CPUShares     *int64
+	CFSQuota      *int64
+	CPUSet        *string
+	MemoryLimit   *int64
+	NetClsClassId *uint32
 
 	// extended resources
-	CPUBvt *int64
+	CPUBvt  *int64
+	CPUIdle *int64
+	Resctrl *Resctrl
 }
 
 func (r *Resources) IsOriginResSet() bool {
@@ -87,7 +98,8 @@ func (r *Resources) IsOriginResSet() bool {
 }
 
 func (r *Resources) FromPod(pod *corev1.Pod) {
-	requests, limits := resource.PodRequestsAndLimits(pod)
+	requests := resource.PodRequests(pod, resource.PodResourcesOptions{})
+	limits := resource.PodLimits(pod, resource.PodResourcesOptions{})
 	cpuShares := sysutil.MilliCPUToShares(requests.Cpu().MilliValue())
 	cfsQuota := sysutil.MilliCPUToQuota(limits.Cpu().MilliValue())
 	memoryLimit := limits.Memory().Value()
@@ -121,6 +133,13 @@ func (r *Resources) FromContainer(container *corev1.Container) {
 		memoryLimit := int64(-1)
 		r.MemoryLimit = &memoryLimit
 	}
+}
+
+type Mount struct {
+	Destination string   `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
+	Type        string   `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	Source      string   `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	Options     []string `protobuf:"bytes,4,rep,name=options,proto3" json:"options,omitempty"`
 }
 
 func injectCPUShares(cgroupParent string, cpuShares int64, a *audit.EventHelper, e resourceexecutor.ResourceUpdateExecutor) (resourceexecutor.ResourceUpdater, error) {
@@ -161,6 +180,40 @@ func injectMemoryLimit(cgroupParent string, memoryLimit int64, a *audit.EventHel
 func injectCPUBvt(cgroupParent string, bvtValue int64, a *audit.EventHelper, e resourceexecutor.ResourceUpdateExecutor) (resourceexecutor.ResourceUpdater, error) {
 	bvtValueStr := strconv.FormatInt(bvtValue, 10)
 	updater, err := resourceexecutor.DefaultCgroupUpdaterFactory.New(sysutil.CPUBVTWarpNsName, cgroupParent, bvtValueStr, a)
+	if err != nil {
+		return nil, err
+	}
+	return updater, nil
+}
+
+func injectCPUIdle(cgroupParent string, idleValue int64, a *audit.EventHelper, e resourceexecutor.ResourceUpdateExecutor) (resourceexecutor.ResourceUpdater, error) {
+	idleValueStr := strconv.FormatInt(idleValue, 10)
+	updater, err := resourceexecutor.DefaultCgroupUpdaterFactory.New(sysutil.CPUIdleName, cgroupParent, idleValueStr, a)
+	if err != nil {
+		return nil, err
+	}
+	return updater, nil
+}
+
+func injectNetClsClassId(cgroupParent string, classId uint32, a *audit.EventHelper, e resourceexecutor.ResourceUpdateExecutor) (resourceexecutor.ResourceUpdater, error) {
+	clsIdStr := strconv.FormatUint(uint64(classId), 10)
+	updater, err := resourceexecutor.DefaultCgroupUpdaterFactory.New(sysutil.NetClsClassIdName, cgroupParent, clsIdStr, a)
+	if err != nil {
+		return nil, err
+	}
+	return updater, nil
+}
+
+func createCatGroup(closid string, a *audit.EventHelper, e resourceexecutor.ResourceUpdateExecutor) (resourceexecutor.ResourceUpdater, error) {
+	updater, err := resourceexecutor.NewCatGroupResource(closid, a)
+	if err != nil {
+		return nil, err
+	}
+	return updater, nil
+}
+
+func injectResctrl(closid string, schemata string, e *audit.EventHelper, executor resourceexecutor.ResourceUpdateExecutor) (resourceexecutor.ResourceUpdater, error) {
+	updater, err := resourceexecutor.NewResctrlSchemataResource(closid, schemata, e)
 	if err != nil {
 		return nil, err
 	}

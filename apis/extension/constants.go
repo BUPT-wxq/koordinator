@@ -40,6 +40,17 @@ const (
 	// LabelPodMutatingUpdate is a label key that pods with `pod.koordinator.sh/mutating-update=true` will
 	// be mutated by Koordinator webhook when updating.
 	LabelPodMutatingUpdate = PodDomainPrefix + "/mutating-update"
+
+	// AnnotationNetworkQOS are used to set bandwidth for Pod. The unit is bps.
+	// For example, 10M means 10 megabits per second.
+	AnnotationNetworkQOS = DomainPrefix + "networkQOS"
+
+	// LabelPodEvictEnabled is a label key that pods with `koordinator.sh/eviction-disabled` will
+	// be able to evict.
+	LabelPodEvictEnabled = DomainPrefix + "eviction-enabled"
+
+	// LabelPodSkipEnhancedValidation is the pod label key used to opt out a pod from enhanced validation.
+	LabelPodSkipEnhancedValidation = PodDomainPrefix + "/skip-enhanced-validation"
 )
 
 type AggregationType string

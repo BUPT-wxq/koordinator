@@ -18,7 +18,7 @@ package performance
 
 import (
 	"os"
-	"path"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -344,7 +344,7 @@ func Test_collectPodPSI(t *testing.T) {
 }
 
 func createTestPSIFile(filePath, contents string) error {
-	dir, _ := path.Split(filePath)
+	dir, _ := filepath.Split(filePath)
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return err
 	}
@@ -404,8 +404,8 @@ func mockLSPod() *corev1.Pod {
 //	   Mem: /sys/fs/cgroup/cpu/kubepods.slice/kubepods-burstable.slice/kubepods-pod7712555c_ce62_454a_9e18_9ff0217b8941.slice/memory.pressure
 //	   IO:  /sys/fs/cgroup/cpu/kubepods.slice/kubepods-burstable.slice/kubepods-pod7712555c_ce62_454a_9e18_9ff0217b8941.slice/io.pressure
 //	 }
-func getPodCgroupCPUAcctPSIPath(podParentDir string) resourceexecutor.PSIPath {
-	return resourceexecutor.PSIPath{
+func getPodCgroupCPUAcctPSIPath(podParentDir string) system.PSIPath {
+	return system.PSIPath{
 		CPU: system.GetCgroupFilePath(podParentDir, system.CPUAcctCPUPressure),
 		Mem: system.GetCgroupFilePath(podParentDir, system.CPUAcctMemoryPressure),
 		IO:  system.GetCgroupFilePath(podParentDir, system.CPUAcctIOPressure),

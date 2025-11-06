@@ -18,7 +18,6 @@ package blkio
 
 import (
 	"fmt"
-	"path"
 	"path/filepath"
 	"testing"
 
@@ -50,6 +49,7 @@ const (
 )
 
 func TestBlkIOReconcile_reconcile(t *testing.T) {
+	helper := system.NewFileTestUtil(t)
 	sysFSRootDirName := BlkIOReconcileName
 
 	testingNodeSLO := newNodeSLO()
@@ -92,7 +92,14 @@ func TestBlkIOReconcile_reconcile(t *testing.T) {
 		"/dev/mapper/yoda--pool0-yoda--test1":                                    "yoda-pool0",
 		"/dev/mapper/yoda--pool0-yoda--test2":                                    "yoda-pool0",
 	}
-	system.Conf.CgroupKubePath = KubePath
+
+	var oldVarLibKubeletRoot string
+	helper.SetConf(func(conf *system.Config) {
+		oldVarLibKubeletRoot = conf.VarLibKubeletRootDir
+		conf.VarLibKubeletRootDir = KubePath
+	}, func(conf *system.Config) {
+		conf.VarLibKubeletRootDir = oldVarLibKubeletRoot
+	})
 	mpDiskMap := map[string]string{
 		fmt.Sprintf("%s/pods/%s/volumes/kubernetes.io~csi/%s/mount", KubePath, pod0.UID, "yoda-87d8625a-dcc9-47bf-a14a-994cf2971193"): "/dev/mapper/yoda--pool0-yoda--87d8625a--dcc9--47bf--a14a--994cf2971193",
 		fmt.Sprintf("%s/pods/%s/volumes/kubernetes.io~csi/html/mount", KubePath, pod1.UID):                                            "/dev/mapper/yoda--pool0-yoda--test1",
@@ -118,6 +125,7 @@ func TestBlkIOReconcile_reconcile(t *testing.T) {
 			testingPodMeta2}).AnyTimes()
 		statesInformer.EXPECT().GetNodeSLO().Return(testingNodeSLO).AnyTimes()
 		statesInformer.EXPECT().GetVolumeName("default", PVCName).Return(PVName).AnyTimes()
+		statesInformer.EXPECT().HasSynced().Return(true).AnyTimes()
 
 		mockMetricCache := mock_metriccache.NewMockMetricCache(ctrl)
 		mockMetricCache.EXPECT().Get(metriccache.NodeLocalStorageInfoKey).Return(localStorageInfo, true).AnyTimes()
@@ -130,7 +138,7 @@ func TestBlkIOReconcile_reconcile(t *testing.T) {
 
 		helper := system.NewFileTestUtil(t)
 		helper.SetAnolisOSResourcesSupported(true)
-		system.Conf.CgroupRootDir = path.Join(helper.TempDir, sysFSRootDirName)
+		system.Conf.CgroupRootDir = filepath.Join(helper.TempDir, sysFSRootDirName)
 		// root class
 		rootClassDir := ""
 		helper.WriteCgroupFileContents(rootClassDir, system.BlkioIOQoS, "253:16 enable=1 ctrl=user rlat=2000 wlat=2000")
@@ -246,8 +254,17 @@ func newNodeSLO() *slov1alpha1.NodeSLO {
 									Name:      "/dev/vdb",
 									BlockType: slov1alpha1.BlockTypeDevice,
 									IOCfg: slov1alpha1.IOCfg{
-										ReadLatency:  pointer.Int64(1000),
-										WriteLatency: pointer.Int64(1000),
+										ReadLatency:         pointer.Int64(1000),
+										WriteLatency:        pointer.Int64(1000),
+										ReadLatencyPercent:  pointer.Int64(90),
+										WriteLatencyPercent: pointer.Int64(90),
+										EnableUserModel:     pointer.Bool(true),
+										ModelReadBPS:        pointer.Int64(3324911720),
+										ModelWriteBPS:       pointer.Int64(2765819289),
+										ModelReadSeqIOPS:    pointer.Int64(168274),
+										ModelWriteSeqIOPS:   pointer.Int64(367565),
+										ModelReadRandIOPS:   pointer.Int64(352545),
+										ModelWriteRandIOPS:  pointer.Int64(339390),
 									},
 								},
 							},

@@ -21,6 +21,7 @@ import (
 	"k8s.io/utils/pointer"
 
 	ext "github.com/koordinator-sh/koordinator/apis/extension"
+	slov1alpha1 "github.com/koordinator-sh/koordinator/apis/slo/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/protocol"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/util"
 )
@@ -30,11 +31,33 @@ func (b *bvtPlugin) SetPodBvtValue(p protocol.HooksProtocol) error {
 	if r == nil {
 		return nil
 	}
+
 	podCtx := p.(*protocol.PodContext)
 	req := podCtx.Request
 	podQOS := ext.GetQoSClassByAttrs(req.Labels, req.Annotations)
 	podKubeQOS := util.GetKubeQoSByCgroupParent(req.CgroupParent)
 	podBvt := r.getPodBvtValue(podQOS, podKubeQOS)
+
+	// pod annotatations take precedence to the default CPUQoS which retrieve from getPodBvtValue
+	cfg, err := slov1alpha1.GetPodCPUQoSConfigByAttr(req.Labels, req.Annotations)
+	if err != nil {
+		return err
+	}
+	// we can change group identity by pod annotations only when QoS=LS
+	// because LS=2 and BE=-1 by default
+	// we only allow LS change to BE
+	// and not allow BE change to LS
+	// and do not change LSR/LSE
+	if cfg != nil && podQOS == ext.QoSLS {
+		if cfg.GroupIdentity != nil {
+			podBvt = *cfg.GroupIdentity
+		}
+
+		// if disabled, set bvt to zero
+		if cfg.Enable == nil || (cfg.Enable != nil && !(*cfg.Enable)) {
+			podBvt = 0
+		}
+	}
 	podCtx.Response.Resources.CPUBvt = pointer.Int64(podBvt)
 	return nil
 }
@@ -73,10 +96,16 @@ func (b *bvtPlugin) prepare() *bvtRule {
 		klog.V(5).Infof("hook plugin rule is nil, nothing to do for plugin %v", name)
 		return nil
 	}
-	err := b.initialize()
+
+	isSysctlEnabled, err := b.isSysctlEnabled()
 	if err != nil {
-		klog.V(4).Infof("failed to initialize plugin %s, err: %s", name, err)
+		klog.V(4).Infof("failed to check sysctl for plugin %s, err: %s", name, err)
 		return nil
 	}
+	if !r.getEnable() && !isSysctlEnabled { // no need to update cgroups if both rule and sysctl disabled
+		klog.V(5).Infof("rule is disabled for plugin %v, no more to do for resources", name)
+		return nil
+	}
+
 	return r
 }

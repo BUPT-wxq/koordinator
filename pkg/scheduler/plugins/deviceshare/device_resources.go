@@ -62,17 +62,17 @@ func (r deviceResources) append(in deviceResources, hintMinors sets.Int) {
 	}
 }
 
-func (r deviceResources) subtract(in deviceResources) {
-	if len(r) == 0 {
+func (r deviceResources) subtract(in deviceResources, withNonNegativeResult bool) {
+	if r == nil {
 		return
 	}
 	for minor, res := range in {
-		resourceList, ok := r[minor]
-		if !ok {
-			continue
+		resourceList := r[minor]
+		if withNonNegativeResult {
+			resourceList = quotav1.SubtractWithNonNegativeResult(resourceList, res)
+		} else {
+			resourceList = quotav1.Subtract(resourceList, res)
 		}
-		resourceNames := quotav1.ResourceNames(resourceList)
-		resourceList = quotav1.SubtractWithNonNegativeResult(resourceList, quotav1.Mask(res, resourceNames))
 		if quotav1.IsZero(resourceList) {
 			delete(r, minor)
 		} else {
@@ -98,13 +98,14 @@ func copyDeviceResources(m map[schedulingv1alpha1.DeviceType]deviceResources) ma
 	return r
 }
 
-func subtractAllocated(m, allocated map[schedulingv1alpha1.DeviceType]deviceResources) map[schedulingv1alpha1.DeviceType]deviceResources {
+func subtractAllocated(m, allocated map[schedulingv1alpha1.DeviceType]deviceResources, withNonNegativeResult bool) map[schedulingv1alpha1.DeviceType]deviceResources {
 	for deviceType, devicesResources := range allocated {
 		ra := m[deviceType]
-		if len(ra) == 0 {
-			continue
+		if ra == nil {
+			ra = deviceResources{}
+			m[deviceType] = ra
 		}
-		ra.subtract(devicesResources)
+		ra.subtract(devicesResources, withNonNegativeResult)
 		if len(ra) == 0 {
 			delete(m, deviceType)
 		}
@@ -183,6 +184,7 @@ func scoreDevices(podRequest corev1.ResourceList, totalResources, freeResources 
 	return r
 }
 
+// sortDeviceResourcesByMinor sort devices by preferred than by score than by minor.
 func sortDeviceResourcesByMinor(r []deviceResourceMinorPair, preferred sets.Int) []deviceResourceMinorPair {
 	if preferred.Len() > 0 {
 		for i := range r {
@@ -206,14 +208,48 @@ func sortDeviceResourcesByMinor(r []deviceResourceMinorPair, preferred sets.Int)
 	return r
 }
 
+// sortDeviceResourcesByPreferredPCIe sort devices by preferred PCIes than by score than by minor.
+// Note that it uses a round-robin sort for devices of preferred PCIes, in other words,
+// it would sort the 1st device of each PCIe than 2nd, and so on, to make sure that every preferred PCIe gets a device with best efforts.
 func sortDeviceResourcesByPreferredPCIe(r []deviceResourceMinorPair, preferredPCIe sets.String, deviceInfos map[int]*schedulingv1alpha1.DeviceInfo) []deviceResourceMinorPair {
-	for i := range r {
-		r[i].preferred = false
-		minor := r[i].minor
+	// overall sorting
+	r = sortDeviceResourcesByMinor(r, nil)
+
+	// group devices by pcie
+	var (
+		groupedPreferred = make(map[string][]deviceResourceMinorPair)
+		maxGroupSize     int
+		notPreferred     []deviceResourceMinorPair
+	)
+	for _, p := range r {
+		minor := p.minor
 		deviceInfo := deviceInfos[minor]
 		if deviceInfo != nil && deviceInfo.Topology != nil && preferredPCIe.Has(deviceInfo.Topology.PCIEID) {
-			r[i].preferred = true
+			pcieID := deviceInfo.Topology.PCIEID
+			groupedPreferred[pcieID] = append(groupedPreferred[pcieID], p)
+			groupSize := len(groupedPreferred[pcieID])
+			if groupSize > maxGroupSize {
+				maxGroupSize = groupSize
+			}
+		} else {
+			notPreferred = append(notPreferred, p)
 		}
 	}
-	return sortDeviceResourcesByMinor(r, nil)
+
+	// round-robin sorting by group
+	result := make([]deviceResourceMinorPair, 0, len(r))
+	for i := 0; i < maxGroupSize; i++ {
+		var partialResult []deviceResourceMinorPair
+		for _, group := range groupedPreferred {
+			if i >= len(group) {
+				continue
+			}
+			partialResult = append(partialResult, group[i])
+		}
+		partialResult = sortDeviceResourcesByMinor(partialResult, nil)
+		result = append(result, partialResult...)
+	}
+
+	result = append(result, notPreferred...)
+	return result
 }

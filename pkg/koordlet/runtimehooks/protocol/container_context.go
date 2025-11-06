@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
@@ -92,7 +94,7 @@ func (c *ContainerRequest) FromNri(pod *api.PodSandbox, container *api.Container
 
 	spec, err := apiext.GetExtendedResourceSpec(pod.GetAnnotations())
 	if err != nil {
-		klog.V(4).Infof("failed to get ExtendedResourceSpec from nri via annotation, container %s/%s, err: %s",
+		klog.V(4).Infof("failed to get ExtendedResourceSpec from nri via annotation, container %s/%s, name: %s, err: %s",
 			c.PodMeta.Namespace, c.PodMeta.Name, c.ContainerMeta.Name, err)
 	}
 	if spec != nil && spec.Containers != nil {
@@ -112,7 +114,7 @@ func (c *ContainerRequest) FromProxy(req *runtimeapi.ContainerResourceHookReques
 	// retrieve ExtendedResources from pod annotations
 	spec, err := apiext.GetExtendedResourceSpec(req.GetPodAnnotations())
 	if err != nil {
-		klog.V(4).Infof("failed to get ExtendedResourceSpec from proxy via annotation, container %s/%s, err: %s",
+		klog.V(4).Infof("failed to get ExtendedResourceSpec from proxy via annotation, container %s/%s, name: %s, err: %s",
 			c.PodMeta.Namespace, c.PodMeta.Name, c.ContainerMeta.Name, err)
 	}
 	if spec != nil && spec.Containers != nil {
@@ -126,27 +128,55 @@ func (c *ContainerRequest) FromReconciler(podMeta *statesinformer.PodMeta, conta
 	c.PodMeta.FromReconciler(podMeta.Pod.ObjectMeta)
 	c.ContainerMeta.Name = containerName
 	c.ContainerMeta.Sandbox = sandbox
+	c.PodLabels = podMeta.Pod.Labels
+	c.PodAnnotations = podMeta.Pod.Annotations
+
 	if sandbox {
 		var err error
 		if c.ContainerMeta.ID, err = koordletutil.GetPodSandboxContainerID(podMeta.Pod); err != nil {
-			klog.V(4).Infof("no container id for pod %v, container may not start, %v",
-				util.GetPodKey(podMeta.Pod), err)
-			return
+			klog.V(4).Infof("failed to get sandbox container ID for pod %s, err: %s",
+				podMeta.Key(), err)
 		} else if c.ContainerMeta.ID == "" {
-			klog.V(4).Infof("container status is empty for pod %v, skip")
-			return
+			klog.V(4).Infof("container ID is empty for pod %s, pod may not start, skip", podMeta.Key())
+		} else {
+			c.CgroupParent, _ = koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, c.ContainerMeta.ID)
+			klog.V(5).Infof("got sandbox %s cgroup parent %s for pod %s", c.ContainerMeta.ID, c.CgroupParent, podMeta.Key())
 		}
-	} else {
-		for _, containerStat := range podMeta.Pod.Status.ContainerStatuses {
-			if containerStat.Name == containerName {
-				c.ContainerMeta.ID = containerStat.ContainerID
+		return
+	}
+
+	foundInContainer := false
+	for _, containerStat := range podMeta.Pod.Status.ContainerStatuses {
+		if containerStat.Name == containerName {
+			c.ContainerMeta.ID = containerStat.ContainerID
+			foundInContainer = true
+			break
+		}
+	}
+	if !foundInContainer {
+		for _, initContainerStat := range podMeta.Pod.Status.InitContainerStatuses {
+			if initContainerStat.Name == containerName {
+				c.ContainerMeta.ID = initContainerStat.ContainerID
 				break
 			}
 		}
 	}
+	if c.ContainerMeta.ID == "" {
+		klog.V(4).Infof("container ID not found in container and init container status for pod %s, pod may not start, skip", podMeta.Key())
+		return
+	}
+	c.CgroupParent, _ = koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, c.ContainerMeta.ID)
+
+	var containerCandidates []corev1.Container
+	if foundInContainer {
+		containerCandidates = podMeta.Pod.Spec.Containers
+	} else {
+		containerCandidates = podMeta.Pod.Spec.InitContainers
+	}
+
 	var specFromContainer *apiext.ExtendedResourceContainerSpec
-	for i := range podMeta.Pod.Spec.Containers {
-		containerSpec := podMeta.Pod.Spec.Containers[i]
+	for i := range containerCandidates {
+		containerSpec := containerCandidates[i]
 		if containerSpec.Name == containerName {
 			if c.ContainerEnvs == nil {
 				c.ContainerEnvs = map[string]string{}
@@ -160,13 +190,11 @@ func (c *ContainerRequest) FromReconciler(podMeta *statesinformer.PodMeta, conta
 			break
 		}
 	}
-	c.PodLabels = podMeta.Pod.Labels
-	c.PodAnnotations = podMeta.Pod.Annotations
-	c.CgroupParent, _ = koordletutil.GetContainerCgroupParentDirByID(podMeta.CgroupDir, c.ContainerMeta.ID)
+
 	// retrieve ExtendedResources from container spec and pod annotations (prefer container spec)
 	specFromAnnotations, err := apiext.GetExtendedResourceSpec(podMeta.Pod.Annotations)
 	if err != nil {
-		klog.V(4).Infof("failed to get ExtendedResourceSpec from reconciler via annotation, container %s/%s, err: %s",
+		klog.V(4).Infof("failed to get ExtendedResourceSpec from reconciler via annotation, container %s/%s, name: %s, err: %s",
 			c.PodMeta.Namespace, c.PodMeta.Name, c.ContainerMeta.Name, err)
 	}
 	if specFromContainer != nil {
@@ -179,8 +207,18 @@ func (c *ContainerRequest) FromReconciler(podMeta *statesinformer.PodMeta, conta
 }
 
 type ContainerResponse struct {
-	Resources        Resources
-	AddContainerEnvs map[string]string
+	Resources           Resources
+	AddContainerEnvs    map[string]string
+	AddContainerMounts  []*Mount
+	AddContainerDevices []*LinuxDevice
+}
+
+type LinuxDevice struct {
+	Path          string
+	Type          string
+	Major         int64
+	Minor         int64
+	FileModeValue uint32
 }
 
 func (c *ContainerResponse) ProxyDone(resp *runtimeapi.ContainerResourceHookResponse) {
@@ -217,6 +255,10 @@ type ContainerContext struct {
 	updaters []resourceexecutor.ResourceUpdater
 }
 
+func (c *ContainerContext) RecordEvent(r record.EventRecorder, pod *corev1.Pod) {
+	//TODO: Don't record pod by container level
+}
+
 func (c *ContainerContext) FromNri(pod *api.PodSandbox, container *api.Container) {
 	c.Request.FromNri(pod, container)
 }
@@ -225,7 +267,10 @@ func (c *ContainerContext) FromProxy(req *runtimeapi.ContainerResourceHookReques
 	c.Request.FromProxy(req)
 }
 
-func (c *ContainerContext) ProxyDone(resp *runtimeapi.ContainerResourceHookResponse) {
+func (c *ContainerContext) ProxyDone(resp *runtimeapi.ContainerResourceHookResponse, executor resourceexecutor.ResourceUpdateExecutor) {
+	if c.executor == nil {
+		c.executor = executor
+	}
 	c.injectForExt()
 	c.Response.ProxyDone(resp)
 	c.Update()
@@ -259,10 +304,39 @@ func (c *ContainerContext) NriDone(executor resourceexecutor.ResourceUpdateExecu
 		update.SetLinuxMemoryLimit(*c.Response.Resources.MemoryLimit)
 	}
 
+	if c.Response.Resources.Resctrl != nil {
+		adjust.SetLinuxRDTClass((*(c.Response.Resources.Resctrl)).Closid)
+		update.SetLinuxRDTClass((*(c.Response.Resources.Resctrl)).Closid)
+	}
+
 	if c.Response.AddContainerEnvs != nil {
 		for k, v := range c.Response.AddContainerEnvs {
 			adjust.AddEnv(k, v)
 		}
+	}
+
+	for _, m := range c.Response.AddContainerMounts {
+		adjust.AddMount(&api.Mount{
+			Destination: m.Destination,
+			Type:        m.Type,
+			Source:      m.Source,
+			Options:     m.Options,
+		})
+	}
+
+	if len(c.Response.AddContainerDevices) != 0 {
+		for i := range c.Response.AddContainerDevices {
+			adjust.AddDevice(&api.LinuxDevice{
+				Path:  c.Response.AddContainerDevices[i].Path,
+				Type:  c.Response.AddContainerDevices[i].Type,
+				Major: c.Response.AddContainerDevices[i].Major,
+				Minor: c.Response.AddContainerDevices[i].Minor,
+				FileMode: &api.OptionalFileMode{
+					Value: c.Response.AddContainerDevices[i].FileModeValue,
+				},
+			})
+		}
+
 	}
 
 	c.Update()

@@ -39,14 +39,14 @@ const (
 )
 
 type DefaultEstimator struct {
-	resourceWeights map[corev1.ResourceName]int64
-	scalingFactors  map[corev1.ResourceName]int64
+	scalingFactors map[corev1.ResourceName]int64
+	allowCustomize bool
 }
 
 func NewDefaultEstimator(args *config.LoadAwareSchedulingArgs, handle framework.Handle) (Estimator, error) {
 	return &DefaultEstimator{
-		resourceWeights: args.ResourceWeights,
-		scalingFactors:  args.EstimatedScalingFactors,
+		scalingFactors: args.EstimatedScalingFactors,
+		allowCustomize: args.AllowCustomizeEstimation,
 	}, nil
 }
 
@@ -55,16 +55,29 @@ func (e *DefaultEstimator) Name() string {
 }
 
 func (e *DefaultEstimator) EstimatePod(pod *corev1.Pod) (map[corev1.ResourceName]int64, error) {
-	return estimatedPodUsed(pod, e.resourceWeights, e.scalingFactors), nil
+	var factors map[corev1.ResourceName]int64
+	if e.allowCustomize {
+		factors = extension.GetCustomEstimatedScalingFactors(pod)
+	}
+	if len(factors) == 0 {
+		factors = e.scalingFactors
+	} else {
+		for k, v := range e.scalingFactors {
+			if _, ok := factors[k]; !ok {
+				factors[k] = v
+			}
+		}
+	}
+	return estimatedPodUsed(pod, factors), nil
 }
 
-func estimatedPodUsed(pod *corev1.Pod, resourceWeights map[corev1.ResourceName]int64, scalingFactors map[corev1.ResourceName]int64) map[corev1.ResourceName]int64 {
-	requests, limits := resourceapi.PodRequestsAndLimits(pod)
+func estimatedPodUsed(pod *corev1.Pod, scalingFactors map[corev1.ResourceName]int64) map[corev1.ResourceName]int64 {
+	requests, limits := resourceapi.PodRequests(pod, resourceapi.PodResourcesOptions{}), resourceapi.PodLimits(pod, resourceapi.PodResourcesOptions{})
 	estimatedUsed := make(map[corev1.ResourceName]int64)
 	priorityClass := extension.GetPodPriorityClassWithDefault(pod)
-	for resourceName := range resourceWeights {
+	for resourceName, factor := range scalingFactors {
 		realResourceName := extension.TranslateResourceNameByPriorityClass(priorityClass, resourceName)
-		estimatedUsed[resourceName] = estimatedUsedByResource(requests, limits, realResourceName, scalingFactors[resourceName])
+		estimatedUsed[resourceName] = estimatedUsedByResource(requests, limits, realResourceName, factor)
 	}
 	return estimatedUsed
 }
@@ -75,7 +88,6 @@ func estimatedUsedByResource(requests, limits corev1.ResourceList, resourceName 
 	requestQuantity := requests[resourceName]
 	var quantity resource.Quantity
 	if limitQuantity.Cmp(requestQuantity) > 0 {
-		scalingFactor = 100
 		quantity = limitQuantity
 	} else {
 		quantity = requestQuantity

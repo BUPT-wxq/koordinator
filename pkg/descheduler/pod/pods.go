@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 	qoshelper "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework"
@@ -96,16 +97,19 @@ func (o *Options) BuildFilterFunc() (FilterFunc, error) {
 		}
 	}
 	return func(pod *corev1.Pod) bool {
-		if o.filter != nil && !o.filter(pod) {
-			return false
-		}
 		if len(o.includedNamespaces) > 0 && !o.includedNamespaces.Has(pod.Namespace) {
+			klog.V(4).InfoS("Pod fails the following checks", "pod", klog.KObj(pod), "checks", "includedNamespaces")
 			return false
 		}
 		if len(o.excludedNamespaces) > 0 && o.excludedNamespaces.Has(pod.Namespace) {
+			klog.V(4).InfoS("Pod fails the following checks", "pod", klog.KObj(pod), "checks", "excludedNamespaces")
 			return false
 		}
 		if s != nil && !s.Matches(labels.Set(pod.GetLabels())) {
+			klog.V(4).InfoS("Pod fails the following checks", "pod", klog.KObj(pod), "checks", "labelSelector")
+			return false
+		}
+		if o.filter != nil && !o.filter(pod) {
 			return false
 		}
 		return true

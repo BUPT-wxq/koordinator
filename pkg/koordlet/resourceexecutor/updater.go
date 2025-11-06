@@ -46,6 +46,7 @@ func init() {
 	DefaultCgroupUpdaterFactory.Register(NewCommonCgroupUpdater,
 		sysutil.CPUBurstName,
 		sysutil.CPUBVTWarpNsName,
+		sysutil.CPUIdleName,
 		sysutil.CPUTasksName,
 		sysutil.CPUProcsName,
 		sysutil.MemoryWmarkRatioName,
@@ -54,10 +55,11 @@ func init() {
 		sysutil.MemoryPriorityName,
 		sysutil.MemoryUsePriorityOomName,
 		sysutil.MemoryOomGroupName,
+		sysutil.NetClsClassIdName,
 	)
 	// special cases
 	DefaultCgroupUpdaterFactory.Register(NewCgroupUpdaterWithUpdateFunc(CgroupUpdateCPUSharesFunc), sysutil.CPUSharesName)
-	DefaultCgroupUpdaterFactory.Register(NewMergeableCgroupUpdaterWithConditionFunc(CgroupUpdateWithUnlimitedFunc, MergeConditionIfValueIsLarger),
+	DefaultCgroupUpdaterFactory.Register(NewMergeableCgroupUpdaterWithConditionFunc(CgroupUpdateWithUnlimitedFunc, MergeConditionIfCFSQuotaIsLarger),
 		sysutil.CPUCFSQuotaName,
 	)
 	DefaultCgroupUpdaterFactory.Register(NewMergeableCgroupUpdaterIfValueLarger,
@@ -74,6 +76,7 @@ func init() {
 		sysutil.BlkioTWIopsName,
 		sysutil.BlkioTWBpsName,
 		sysutil.BlkioIOQoSName,
+		sysutil.BlkioIOModelName,
 		sysutil.BlkioIOWeightName,
 	)
 }
@@ -83,6 +86,8 @@ type UpdateFunc func(resource ResourceUpdater) error
 type MergeUpdateFunc func(resource ResourceUpdater) (ResourceUpdater, error)
 
 type ResourceUpdater interface {
+	// Name returns the name of the resource updater
+	Name() string
 	ResourceType() sysutil.ResourceType
 	Key() string
 	Path() string
@@ -109,6 +114,10 @@ type CgroupResourceUpdater struct {
 	//    the new value with old value; then update resources from lower to upper with the new value.
 	mergeUpdateFunc MergeUpdateFunc
 	eventHelper     *audit.EventHelper
+}
+
+func (u *CgroupResourceUpdater) Name() string {
+	return "cgroup"
 }
 
 func (u *CgroupResourceUpdater) ResourceType() sysutil.ResourceType {
@@ -185,6 +194,10 @@ type DefaultResourceUpdater struct {
 	eventHelper         *audit.EventHelper
 }
 
+func (u *DefaultResourceUpdater) Name() string {
+	return "default"
+}
+
 func (u *DefaultResourceUpdater) ResourceType() sysutil.ResourceType {
 	return sysutil.ResourceType(u.file)
 }
@@ -242,11 +255,6 @@ func NewCommonDefaultUpdaterWithUpdateFunc(key string, file string, value string
 		updateFunc:  updateFunc,
 		eventHelper: e,
 	}, nil
-}
-
-type GuestCgroupResourceUpdater struct {
-	*CgroupResourceUpdater
-	sandboxID string // for execute the file operation inside the sandbox
 }
 
 type NewResourceUpdaterFunc func(resourceType sysutil.ResourceType, parentDir string, value string, e *audit.EventHelper) (ResourceUpdater, error)
@@ -431,16 +439,6 @@ func MergeFuncUpdateCgroup(resource ResourceUpdater, mergeCondition MergeConditi
 	return resource, cgroupFileWrite(c.parentDir, c.file, mergedValue)
 }
 
-func MergeFuncUpdateCgroupUnlimited(resource ResourceUpdater, mergeCondition MergeConditionFunc) (ResourceUpdater, error) {
-	c := resource.(*CgroupResourceUpdater)
-	// NOTE: convert "-1" to "max", since some cgroups-v2 files only accept "max" to unlimit resource instead of "-1".
-	//       DO NOT use it on the cgroups which has a valid value of "-1".
-	if c.value == sysutil.CgroupUnlimitedSymbolStr && sysutil.GetCurrentCgroupVersion() == sysutil.CgroupVersionV2 {
-		c.value = sysutil.CgroupMaxSymbolStr
-	}
-	return MergeFuncUpdateCgroup(c, mergeCondition)
-}
-
 // MergeConditionIfValueIsLarger returns a merge condition where only do update when the new value is larger.
 func MergeConditionIfValueIsLarger(oldValue, newValue string) (string, bool, error) {
 	var newV, oldV int64
@@ -453,7 +451,7 @@ func MergeConditionIfValueIsLarger(oldValue, newValue string) (string, bool, err
 			return newValue, false, fmt.Errorf("new value is not int64, err: %v", err)
 		}
 	}
-	if oldValue == sysutil.CgroupMaxSymbolStr || newValue == sysutil.CgroupUnlimitedSymbolStr { // compatible with cgroup valued "max"
+	if oldValue == sysutil.CgroupMaxSymbolStr || oldValue == sysutil.CgroupUnlimitedSymbolStr { // compatible with cgroup valued "max"
 		oldV = int64(math.MaxInt64)
 	} else {
 		oldV, err = strconv.ParseInt(oldValue, 10, 64)
@@ -461,6 +459,41 @@ func MergeConditionIfValueIsLarger(oldValue, newValue string) (string, bool, err
 			return newValue, false, fmt.Errorf("old value is not int64, err: %v", err)
 		}
 	}
+	return newValue, newV > oldV, nil
+}
+
+func MergeConditionIfCFSQuotaIsLarger(oldValue, newValue string) (string, bool, error) {
+	var newV, oldV int64
+	var err error
+	if newValue == sysutil.CgroupMaxSymbolStr || newValue == sysutil.CgroupUnlimitedSymbolStr {
+		newV = int64(math.MaxInt64)
+	} else {
+		newV, err = strconv.ParseInt(newValue, 10, 64)
+		if err != nil {
+			return newValue, false, fmt.Errorf("new value is not int64, err: %v", err)
+		}
+	}
+
+	// cgroup-v2 content: "max 100000", "100000 100000"
+	if sysutil.GetCurrentCgroupVersion() == sysutil.CgroupVersionV2 {
+		oldV, err = sysutil.ParseCPUCFSQuotaV2(oldValue)
+		if err != nil {
+			return newValue, false, fmt.Errorf("cannot parse old value %s, err: %v", oldValue, err)
+		}
+		if oldV == -1 {
+			oldV = int64(math.MaxInt64)
+		}
+	} else { // cgroup-v1 content: "-1", "100000"
+		if oldValue == sysutil.CgroupUnlimitedSymbolStr { // compatible with cgroup valued "max"
+			oldV = int64(math.MaxInt64)
+		} else {
+			oldV, err = strconv.ParseInt(oldValue, 10, 64)
+			if err != nil {
+				return newValue, false, fmt.Errorf("old value is not int64, err: %v", err)
+			}
+		}
+	}
+
 	return newValue, newV > oldV, nil
 }
 
@@ -532,7 +565,7 @@ func cgroupBlkIOFileWriteIfDifferent(cgroupTaskDir string, file sysutil.Resource
 	}
 
 	switch file.ResourceType() {
-	case sysutil.BlkioIOQoSName:
+	case sysutil.BlkioIOQoSName, sysutil.BlkioIOModelName:
 		needUpdate = CheckIfBlkRootConfigNeedUpdate(currentValue, value)
 	case sysutil.BlkioTRIopsName, sysutil.BlkioTRBpsName, sysutil.BlkioTWIopsName, sysutil.BlkioTWBpsName, sysutil.BlkioIOWeightName:
 		needUpdate = CheckIfBlkQOSNeedUpdate(currentValue, value)

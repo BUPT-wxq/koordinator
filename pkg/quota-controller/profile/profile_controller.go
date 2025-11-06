@@ -35,15 +35,16 @@ import (
 	quotav1 "k8s.io/apiserver/pkg/quota/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	nodeutil "k8s.io/kubernetes/pkg/util/node"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	schedv1alpha1 "sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
 	"github.com/koordinator-sh/koordinator/apis/quota/v1alpha1"
+	schedv1alpha1 "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
 	utilclient "github.com/koordinator-sh/koordinator/pkg/util/client"
 )
 
@@ -138,11 +139,16 @@ func (r *QuotaProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// TODO: consider node status.
 	totalResource := corev1.ResourceList{}
+	unschedulableResource := corev1.ResourceList{}
 	for _, node := range nodeList.Items {
 		totalResource = quotav1.Add(totalResource, GetNodeAllocatable(node))
+		if node.Spec.Unschedulable || !nodeutil.IsNodeReady(&node) {
+			unschedulableResource = quotav1.Add(unschedulableResource, GetNodeAllocatable(node))
+		}
 	}
 
 	decorateTotalResource(profile, totalResource)
+	decorateTotalResource(profile, unschedulableResource)
 
 	resourceKeys := []string{"cpu", "memory"}
 	raw, ok := profile.Annotations[extension.AnnotationResourceKeys]
@@ -197,10 +203,18 @@ func (r *QuotaProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	quota.Annotations[extension.AnnotationTotalResource] = string(data)
 
+	// update unschedulable resource
+	data, err = json.Marshal(unschedulableResource)
+	if err != nil {
+		klog.Errorf("failed marshal unschedulable resources, err: %v", err)
+		return ctrl.Result{Requeue: true}, err
+	}
+	quota.Annotations[extension.AnnotationUnschedulableResource] = string(data)
+
 	if !quotaExist {
 		err = r.Client.Create(context.TODO(), quota)
 		if err != nil {
-			r.Recorder.Eventf(profile, "Warning", ReasonCreateQuotaFailed, "failed to create quota, err: %s", err)
+			r.Recorder.Eventf(profile, corev1.EventTypeWarning, ReasonCreateQuotaFailed, "failed to create quota, err: %s", err)
 			klog.Errorf("failed create quota for profile %v, error: %v", req.NamespacedName, err)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
@@ -208,7 +222,7 @@ func (r *QuotaProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if !reflect.DeepEqual(quota.Labels, oldQuota.Labels) || !reflect.DeepEqual(quota.Annotations, oldQuota.Annotations) || !reflect.DeepEqual(quota.Spec, oldQuota.Spec) {
 			err = r.Client.Update(context.TODO(), quota)
 			if err != nil {
-				r.Recorder.Eventf(profile, "Warning", ReasonUpdateQuotaFailed, "failed to update quota, err: %s", err)
+				r.Recorder.Eventf(profile, corev1.EventTypeWarning, ReasonUpdateQuotaFailed, "failed to update quota, err: %s", err)
 				klog.Errorf("failed update quota for profile %v, error: %v", req.NamespacedName, err)
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}

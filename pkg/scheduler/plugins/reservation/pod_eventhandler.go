@@ -26,18 +26,22 @@ import (
 	"k8s.io/klog/v2"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 	frameworkexthelper "github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/helper"
 	"github.com/koordinator-sh/koordinator/pkg/util"
 )
 
 type podEventHandler struct {
-	cache *reservationCache
+	cache     *reservationCache
+	nominator *nominator
 }
 
-func registerPodEventHandler(cache *reservationCache, factory informers.SharedInformerFactory) {
+func registerPodEventHandler(handle frameworkext.ExtendedHandle, cache *reservationCache, nominator *nominator, factory informers.SharedInformerFactory) {
 	eventHandler := &podEventHandler{
-		cache: cache,
+		cache:     cache,
+		nominator: nominator,
 	}
+	handle.RegisterForgetPodHandler(eventHandler.deletePod)
 	informer := factory.Core().V1().Pods().Informer()
 	frameworkexthelper.ForceSyncFromInformer(context.TODO().Done(), factory, informer, eventHandler)
 }
@@ -47,7 +51,7 @@ func assignedPod(pod *corev1.Pod) bool {
 	return len(pod.Spec.NodeName) != 0
 }
 
-func (h *podEventHandler) OnAdd(obj interface{}) {
+func (h *podEventHandler) OnAdd(obj interface{}, isInInitialList bool) {
 	pod, _ := obj.(*corev1.Pod)
 	if pod == nil {
 		return
@@ -92,6 +96,7 @@ func (h *podEventHandler) updatePod(oldPod, newPod *corev1.Pod) {
 		return
 	}
 
+	h.nominator.DeleteNominatedReservePodOrReservation(newPod)
 	var reservationUID types.UID
 	if oldPod != nil {
 		reservationAllocated, err := apiext.GetReservationAllocated(oldPod)
@@ -123,6 +128,8 @@ func (h *podEventHandler) updatePod(oldPod, newPod *corev1.Pod) {
 }
 
 func (h *podEventHandler) deletePod(pod *corev1.Pod) {
+	h.nominator.DeleteNominatedReservePodOrReservation(pod)
+
 	reservationAllocated, err := apiext.GetReservationAllocated(pod)
 	if err == nil && reservationAllocated != nil && reservationAllocated.UID != "" {
 		h.cache.deletePod(reservationAllocated.UID, pod)

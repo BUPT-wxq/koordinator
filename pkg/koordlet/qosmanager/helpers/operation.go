@@ -17,15 +17,18 @@ limitations under the License.
 package helpers
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
+	"github.com/koordinator-sh/koordinator/pkg/koordlet/metrics"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/util/runtime"
 	"github.com/koordinator-sh/koordinator/pkg/util"
 )
 
 // KillContainers kills containers inside the pod
-func KillContainers(pod *corev1.Pod, message string) {
+func KillContainers(pod *corev1.Pod, reason string, message string) {
 	for _, container := range pod.Spec.Containers {
 		containerID, containerStatus, err := util.FindContainerIdAndStatusByName(&pod.Status, container.Name)
 		if err != nil {
@@ -44,11 +47,12 @@ func KillContainers(pod *corev1.Pod, message string) {
 				klog.Errorf("%s, kill container(%s) error! GetRuntimeHandler fail! error: %v", message, containerStatus.ContainerID, err)
 				continue
 			}
-			if err := runtimeHandler.StopContainer(containerID, 0); err != nil {
+			if err := runtimeHandler.StopContainer(context.Background(), containerID, 0); err != nil {
 				klog.Errorf("%s, stop container error! error: %v", message, err)
 			}
 		} else {
 			klog.Warningf("%s, get container ID failed, pod %s/%s containerName %s status: %v", message, pod.Namespace, pod.Name, container.Name, pod.Status.ContainerStatuses)
 		}
 	}
+	metrics.RecordPodEviction(pod.Namespace, pod.Name, reason)
 }

@@ -19,7 +19,7 @@ package metrics
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	_ "k8s.io/component-base/metrics/prometheus/clientgo" // load restclient and workqueue metrics
 )
 
 const (
@@ -40,13 +40,6 @@ const (
 	UnitByte    = "byte"
 	UnitInteger = "integer"
 )
-
-// DefaultRegistry uses the controller runtime registry by default.
-var DefaultRegistry = metrics.Registry
-
-func MustRegister(cs ...prometheus.Collector) {
-	DefaultRegistry.MustRegister(cs...)
-}
 
 func genNodeLabels(node *corev1.Node) prometheus.Labels {
 	ls := prometheus.Labels{}

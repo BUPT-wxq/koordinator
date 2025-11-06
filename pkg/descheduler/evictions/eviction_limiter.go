@@ -27,7 +27,8 @@ import (
 type EvictionLimiter struct {
 	maxPodsToEvictPerNode      *uint
 	maxPodsToEvictPerNamespace *uint
-	lock                       sync.Mutex
+	maxPodsToEvictTotal        *uint
+	lock                       sync.RWMutex
 	totalCount                 uint
 	nodePodCount               nodePodEvictedCount
 	namespacePodCount          namespacePodEvictCount
@@ -36,10 +37,12 @@ type EvictionLimiter struct {
 func NewEvictionLimiter(
 	maxPodsToEvictPerNode *uint,
 	maxPodsToEvictPerNamespace *uint,
+	maxPodsToEvictTotal *uint,
 ) *EvictionLimiter {
 	return &EvictionLimiter{
 		maxPodsToEvictPerNode:      maxPodsToEvictPerNode,
 		maxPodsToEvictPerNamespace: maxPodsToEvictPerNamespace,
+		maxPodsToEvictTotal:        maxPodsToEvictTotal,
 		nodePodCount:               make(nodePodEvictedCount),
 		namespacePodCount:          make(namespacePodEvictCount),
 	}
@@ -56,31 +59,31 @@ func (pe *EvictionLimiter) Reset() {
 
 // NodeEvicted gives a number of pods evicted for node
 func (pe *EvictionLimiter) NodeEvicted(nodeName string) uint {
-	pe.lock.Lock()
-	defer pe.lock.Unlock()
+	pe.lock.RLock()
+	defer pe.lock.RUnlock()
 
 	return pe.nodePodCount[nodeName]
 }
 
 func (pe *EvictionLimiter) NamespaceEvicted(namespace string) uint {
-	pe.lock.Lock()
-	defer pe.lock.Unlock()
+	pe.lock.RLock()
+	defer pe.lock.RUnlock()
 
 	return pe.namespacePodCount[namespace]
 }
 
 // TotalEvicted gives a number of pods evicted through all nodes
 func (pe *EvictionLimiter) TotalEvicted() uint {
-	pe.lock.Lock()
-	defer pe.lock.Unlock()
+	pe.lock.RLock()
+	defer pe.lock.RUnlock()
 
 	return pe.totalCount
 }
 
 // NodeLimitExceeded checks if the number of evictions for a node was exceeded
 func (pe *EvictionLimiter) NodeLimitExceeded(node *corev1.Node) bool {
-	pe.lock.Lock()
-	defer pe.lock.Unlock()
+	pe.lock.RLock()
+	defer pe.lock.RUnlock()
 
 	if pe.maxPodsToEvictPerNode != nil {
 		return pe.nodePodCount[node.Name] == *pe.maxPodsToEvictPerNode
@@ -89,8 +92,8 @@ func (pe *EvictionLimiter) NodeLimitExceeded(node *corev1.Node) bool {
 }
 
 func (pe *EvictionLimiter) NamespaceLimitExceeded(namespace string) bool {
-	pe.lock.Lock()
-	defer pe.lock.Unlock()
+	pe.lock.RLock()
+	defer pe.lock.RUnlock()
 
 	if pe.maxPodsToEvictPerNamespace != nil {
 		return pe.namespacePodCount[namespace] == *pe.maxPodsToEvictPerNamespace
@@ -112,6 +115,11 @@ func (pe *EvictionLimiter) AllowEvict(pod *corev1.Pod) bool {
 
 	if pe.maxPodsToEvictPerNamespace != nil && pe.namespacePodCount[pod.Namespace]+1 > *pe.maxPodsToEvictPerNamespace {
 		klog.ErrorS(fmt.Errorf("maximum number of evicted pods per namespace reached"), "Error evicting pod", "limit", *pe.maxPodsToEvictPerNamespace, "namespace", pod.Namespace)
+		return false
+	}
+
+	if pe.maxPodsToEvictTotal != nil && pe.totalCount+1 > *pe.maxPodsToEvictTotal {
+		klog.ErrorS(fmt.Errorf("maximum number of evicted pods total reached"), "Error evicting pod", "limit", *pe.maxPodsToEvictTotal)
 		return false
 	}
 	return true

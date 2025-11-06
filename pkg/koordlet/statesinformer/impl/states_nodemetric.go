@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -86,6 +87,7 @@ var (
 			NodeMemoryCollectPolicy: &defaultMemoryCollectPolicy,
 		},
 	}
+	timeNow = time.Now
 )
 
 type nodeMetricInformer struct {
@@ -97,6 +99,7 @@ type nodeMetricInformer struct {
 	statusUpdater      *statusUpdater
 
 	podsInformer     *podsInformer
+	nodeInformer     *nodeInformer
 	nodeSLOInformer  *nodeSLOInformer
 	metricCache      metriccache.MetricCache
 	predictorFactory prediction.PredictorFactory
@@ -140,6 +143,14 @@ func (r *nodeMetricInformer) Setup(ctx *PluginOption, state *PluginState) {
 	} else {
 		r.podsInformer = podsInformer
 	}
+
+	nodeInformerIf := state.informerPlugins[nodeInformerName]
+	if nodeInformer, ok := nodeInformerIf.(*nodeInformer); !ok {
+		klog.Fatalf("node informer format error")
+	} else {
+		r.nodeInformer = nodeInformer
+	}
+
 	nodeSLOInformerIf := state.informerPlugins[nodeSLOInformerName]
 	if nodeSLOInformer, ok := nodeSLOInformerIf.(*nodeSLOInformer); !ok {
 		klog.Fatalf("node slo informer format error")
@@ -189,7 +200,7 @@ func (r *nodeMetricInformer) Start(stopCh <-chan struct{}) {
 	}
 
 	go r.nodeMetricInformer.Run(stopCh)
-	if !cache.WaitForCacheSync(stopCh, r.nodeMetricInformer.HasSynced, r.podsInformer.HasSynced, r.nodeSLOInformer.HasSynced) {
+	if !cache.WaitForCacheSync(stopCh, r.nodeMetricInformer.HasSynced, r.podsInformer.HasSynced, r.nodeInformer.HasSynced, r.nodeSLOInformer.HasSynced) {
 		klog.Errorf("timed out waiting for node metric caches to sync")
 	}
 	go r.syncNodeMetricWorker(stopCh)
@@ -324,17 +335,15 @@ func (r *nodeMetricInformer) updateMetricSpec(newNodeMetric *slov1alpha1.NodeMet
 // generateQueryDuration generate query params. It assumes the nodeMetric is initialized
 func (r *nodeMetricInformer) generateQueryDuration() (start time.Time, end time.Time) {
 	aggregateDuration := r.getNodeMetricAggregateDuration()
-	end = time.Now()
-	start = end.Add(-aggregateDuration * time.Second)
+	end = timeNow()
+	start = end.Add(-aggregateDuration)
 	return
 }
 
 func (r *nodeMetricInformer) collectMetric() (*slov1alpha1.NodeMetricInfo, []*slov1alpha1.PodMetricInfo,
 	[]*slov1alpha1.HostApplicationMetricInfo, *slov1alpha1.ReclaimableMetric) {
 	spec := r.getNodeMetricSpec()
-	endTime := time.Now()
-	startTime := endTime.Add(-time.Duration(*spec.CollectPolicy.AggregateDurationSeconds) * time.Second)
-
+	startTime, endTime := r.generateQueryDuration()
 	nodeMetricInfo := &slov1alpha1.NodeMetricInfo{
 		NodeUsage:              r.queryNodeMetric(startTime, endTime, metriccache.AggregationTypeAVG, false),
 		AggregatedNodeUsages:   r.collectNodeAggregateMetric(endTime, spec.CollectPolicy.NodeAggregatePolicy),
@@ -354,14 +363,13 @@ func (r *nodeMetricInformer) collectMetric() (*slov1alpha1.NodeMetricInfo, []*sl
 	podsMeta := r.podsInformer.GetAllPods()
 	podsMetricInfo := make([]*slov1alpha1.PodMetricInfo, 0, len(podsMeta))
 	nodeSLO := r.nodeSLOInformer.GetNodeSLO()
-	hostAppMetricInfo := make([]*slov1alpha1.HostApplicationMetricInfo, 0, len(nodeSLO.Spec.HostApplications))
 	queryParam := metriccache.QueryParam{
 		Aggregate: metriccache.AggregationTypeAVG,
 		Start:     &startTime,
 		End:       &endTime,
 	}
-	prodPredictor := r.predictorFactory.New(prediction.ProdReclaimablePredictor)
-
+	node := r.nodeInformer.GetNode()
+	prodPredictor := r.predictorFactory.New(prediction.ProdReclaimablePredictor, prediction.PredictorContext{Node: node})
 	for _, podMeta := range podsMeta {
 		podMetric, err := r.collectPodMetric(podMeta, queryParam)
 		if err != nil {
@@ -380,24 +388,45 @@ func (r *nodeMetricInformer) collectMetric() (*slov1alpha1.NodeMetricInfo, []*sl
 		}
 		podsMetricInfo = append(podsMetricInfo, podMetric)
 	}
-	for _, hostApp := range nodeSLO.Spec.HostApplications {
-		appMetric, err := r.collectHostAppMetric(&hostApp, queryParam)
-		if err != nil {
-			klog.Warningf("query host application %v metric failed, err: %v", hostApp.Name, err)
-			continue
+	sort.Slice(podsMetricInfo, func(i, j int) bool {
+		if podsMetricInfo[i].Namespace != podsMetricInfo[j].Namespace {
+			return podsMetricInfo[i].Namespace < podsMetricInfo[j].Namespace
 		}
-		hostAppMetricInfo = append(hostAppMetricInfo, appMetric)
+		return podsMetricInfo[i].Name < podsMetricInfo[j].Name
+	})
+	var hostAppMetricInfo []*slov1alpha1.HostApplicationMetricInfo
+	if nodeSLO == nil {
+		klog.V(4).InfoS("NodeSLO is nil, skip collecting host application metrics")
+		hostAppMetricInfo = []*slov1alpha1.HostApplicationMetricInfo{}
+	} else {
+		hostApps := nodeSLO.Spec.HostApplications
+		hostAppMetricInfo = make([]*slov1alpha1.HostApplicationMetricInfo, 0, len(hostApps))
+
+		for _, hostApp := range hostApps {
+			appMetric, err := r.collectHostAppMetric(&hostApp, queryParam)
+			if err != nil {
+				klog.Warningf("query host application %v metric failed, err: %v", hostApp.Name, err)
+				continue
+			}
+			hostAppMetricInfo = append(hostAppMetricInfo, appMetric)
+		}
 	}
+	sort.Slice(hostAppMetricInfo, func(i, j int) bool {
+		return hostAppMetricInfo[i].Name < hostAppMetricInfo[j].Name
+	})
 
 	prodReclaimable := &slov1alpha1.ReclaimableMetric{}
 	if p, err := prodPredictor.GetResult(); err != nil {
 		klog.Errorf("failed to get prediction, err %v", err)
 		metrics.RecordNodeResourcePriorityReclaimable(string(corev1.ResourceCPU), metrics.UnitCore, string(apiext.PriorityProd), 0)
 		metrics.RecordNodeResourcePriorityReclaimable(string(corev1.ResourceMemory), metrics.UnitByte, string(apiext.PriorityProd), 0)
+		// Todo: expose status in nodeMetrics
+		metrics.RecordNodeResourcePriorityReclaimableStatus(string(apiext.PriorityProd), 1)
 	} else {
 		prodReclaimable.Resource = slov1alpha1.ResourceMap{ResourceList: p}
 		metrics.RecordNodeResourcePriorityReclaimable(string(corev1.ResourceCPU), metrics.UnitCore, string(apiext.PriorityProd), float64(p.Cpu().MilliValue())/1000)
 		metrics.RecordNodeResourcePriorityReclaimable(string(corev1.ResourceMemory), metrics.UnitByte, string(apiext.PriorityProd), float64(p.Memory().Value()))
+		metrics.RecordNodeResourcePriorityReclaimableStatus(string(apiext.PriorityProd), 0)
 	}
 
 	return nodeMetricInfo, podsMetricInfo, hostAppMetricInfo, prodReclaimable
@@ -457,6 +486,7 @@ func (r *nodeMetricInformer) collectNodeMetric(queryparam metriccache.QueryParam
 		klog.V(5).Infof("get node metric querier failed, error %v", err)
 		return rl, 0, err
 	}
+	defer querier.Close()
 
 	cpuAggregateResult, err := doQuery(querier, metriccache.NodeCPUUsageMetric, nil)
 	if err != nil {
@@ -512,6 +542,7 @@ func (r *nodeMetricInformer) collectNodeGPUMetric(queryparam metriccache.QueryPa
 		klog.V(5).Infof("get node gpu metric querier failed, error %v", err)
 		return nil, err
 	}
+	defer querier.Close()
 	for _, gpu := range gpus {
 		gpuCoreUsageAggregateResult, err := doQuery(querier, metriccache.NodeGPUCoreUsageMetric, metriccache.MetricPropertiesFunc.GPU(fmt.Sprintf("%d", gpu.Minor), gpu.UUID))
 		if err != nil {
@@ -562,6 +593,7 @@ func (r *nodeMetricInformer) collectNodeAggregateMetric(endTime time.Time, aggre
 		start := endTime.Add(-d.Duration)
 		aggregateUsage := slov1alpha1.AggregatedUsage{
 			Usage: map[apiext.AggregationType]slov1alpha1.ResourceMap{
+				apiext.AVG: r.queryNodeMetric(start, endTime, metriccache.AggregationTypeAVG, true),
 				apiext.P50: r.queryNodeMetric(start, endTime, metriccache.AggregationTypeP50, true),
 				apiext.P90: r.queryNodeMetric(start, endTime, metriccache.AggregationTypeP90, true),
 				apiext.P95: r.queryNodeMetric(start, endTime, metriccache.AggregationTypeP95, true),
@@ -581,6 +613,7 @@ func (r *nodeMetricInformer) collectSystemMetric(queryparam metriccache.QueryPar
 		klog.V(5).Infof("get system metric querier failed, error %v", err)
 		return rl, 0, err
 	}
+	defer querier.Close()
 
 	cpuAggregateResult, err := doQuery(querier, metriccache.SystemCPUUsageMetric, nil)
 	if err != nil {
@@ -641,6 +674,7 @@ func (r *nodeMetricInformer) collectSystemAggregateMetric(endTime time.Time, agg
 		start := endTime.Add(-d.Duration)
 		aggregateUsage := slov1alpha1.AggregatedUsage{
 			Usage: map[apiext.AggregationType]slov1alpha1.ResourceMap{
+				apiext.AVG: r.querySystemMetric(start, endTime, metriccache.AggregationTypeAVG, true),
 				apiext.P50: r.querySystemMetric(start, endTime, metriccache.AggregationTypeP50, true),
 				apiext.P90: r.querySystemMetric(start, endTime, metriccache.AggregationTypeP90, true),
 				apiext.P95: r.querySystemMetric(start, endTime, metriccache.AggregationTypeP95, true),
@@ -665,6 +699,7 @@ func (r *nodeMetricInformer) collectPodMetric(podMeta *statesinformer.PodMeta, q
 		klog.V(5).Infof("failed to get querier for pod %s/%s, error %v", podMeta.Pod.Namespace, podMeta.Pod.Name, err)
 		return nil, err
 	}
+	defer querier.Close()
 
 	cpuAggregateResult, err := doQuery(querier, metriccache.PodCPUUsageMetric, metriccache.MetricPropertiesFunc.Pod(podUID))
 	if err != nil {
@@ -723,6 +758,7 @@ func (r *nodeMetricInformer) collectHostAppMetric(hostApp *slov1alpha1.HostAppli
 		klog.V(5).Infof("failed to get querier for host application %s, error %v", hostApp.Name, err)
 		return nil, err
 	}
+	defer querier.Close()
 
 	cpuAggregateResult, err := doQuery(querier, metriccache.HostAppCPUUsageMetric, metriccache.MetricPropertiesFunc.HostApplication(hostApp.Name))
 	if err != nil {
@@ -773,6 +809,7 @@ func (r *nodeMetricInformer) collectPodGPUMetric(queryparam metriccache.QueryPar
 		klog.V(5).Infof("get pod gpu metric querier failed, error %v", err)
 		return nil, err
 	}
+	defer querier.Close()
 	for _, gpu := range gpus {
 		properties := metriccache.MetricPropertiesFunc.PodGPU(uid, fmt.Sprintf("%d", gpu.Minor), gpu.UUID)
 		gpuCoreUsageAggregateResult, err := doQuery(querier, metriccache.PodGPUCoreUsageMetric, properties)

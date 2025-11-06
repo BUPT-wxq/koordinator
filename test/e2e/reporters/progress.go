@@ -20,15 +20,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
 
-	"github.com/onsi/ginkgo/config"
-	"github.com/onsi/ginkgo/types"
+	"github.com/onsi/ginkgo/v2/config"
+	"github.com/onsi/ginkgo/v2/types"
 )
 
 // ProgressReporter is a ginkgo reporter which tracks the total number of tests to be run/passed/failed/skipped.
@@ -123,7 +123,7 @@ func (reporter *ProgressReporter) postProgressToURL(b []byte) {
 		klog.Errorf("Unexpected response when posting progress update to %v: %v", reporter.progressURL, resp.StatusCode)
 		if resp.Body != nil {
 			defer resp.Body.Close()
-			respBody, err := ioutil.ReadAll(resp.Body)
+			respBody, err := io.ReadAll(resp.Body)
 			if err != nil {
 				klog.Errorf("Failed to read response body from posting progress: %v", err)
 				return

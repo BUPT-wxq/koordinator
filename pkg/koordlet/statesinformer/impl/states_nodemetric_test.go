@@ -163,12 +163,25 @@ func (c *fakeNodeMetricClient) UpdateStatus(ctx context.Context, nodeMetric *slo
 func Test_reporter_sync_with_single_node_metric(t *testing.T) {
 	endTime := time.Now()
 	startTime := endTime.Add(-30 * time.Second)
-
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testNode",
+		},
+		Status: v1.NodeStatus{
+			Capacity: v1.ResourceList{
+				v1.ResourceCPU:    resource.MustParse("4"),
+				v1.ResourceMemory: resource.MustParse("16Gi"),
+			},
+		},
+	}
 	type fields struct {
 		nodeName         string
 		nodeMetric       *slov1alpha1.NodeMetric
 		metricCache      func(ctrl *gomock.Controller) metriccache.MetricCache
 		podsInformer     *podsInformer
+		nodeInformer     *nodeInformer
 		nodeSLOInformer  *nodeSLOInformer
 		nodeMetricLister listerv1alpha1.NodeMetricLister
 		nodeMetricClient clientsetv1alpha1.NodeMetricInterface
@@ -191,6 +204,7 @@ func Test_reporter_sync_with_single_node_metric(t *testing.T) {
 					return nil
 				},
 				podsInformer:     NewPodsInformer(),
+				nodeInformer:     NewNodeInformer(),
 				nodeSLOInformer:  NewNodeSLOInformer(),
 				nodeMetricLister: nil,
 				nodeMetricClient: &fakeNodeMetricClient{},
@@ -203,7 +217,7 @@ func Test_reporter_sync_with_single_node_metric(t *testing.T) {
 			wantErr:            true,
 		},
 		{
-			name: "successfully report nodeMetric",
+			name: "successfully report nodeMetric - sum of pods request < node.allocatable",
 			fields: fields{
 				nodeName: "test",
 				nodeMetric: &slov1alpha1.NodeMetric{
@@ -314,6 +328,9 @@ func Test_reporter_sync_with_single_node_metric(t *testing.T) {
 							},
 						},
 					},
+				},
+				nodeInformer: &nodeInformer{
+					node: node,
 				},
 				nodeSLOInformer: &nodeSLOInformer{
 					nodeSLO: &slov1alpha1.NodeSLO{
@@ -428,6 +445,7 @@ func Test_reporter_sync_with_single_node_metric(t *testing.T) {
 					return c
 				},
 				podsInformer: NewPodsInformer(),
+				nodeInformer: NewNodeInformer(),
 				nodeSLOInformer: &nodeSLOInformer{
 					nodeSLO: &slov1alpha1.NodeSLO{
 						Spec: slov1alpha1.NodeSLOSpec{},
@@ -466,6 +484,7 @@ func Test_reporter_sync_with_single_node_metric(t *testing.T) {
 				nodeMetric:       tt.fields.nodeMetric,
 				metricCache:      tt.fields.metricCache(ctrl),
 				podsInformer:     tt.fields.podsInformer,
+				nodeInformer:     tt.fields.nodeInformer,
 				nodeSLOInformer:  tt.fields.nodeSLOInformer,
 				nodeMetricLister: tt.fields.nodeMetricLister,
 				statusUpdater:    newStatusUpdater(tt.fields.nodeMetricClient),
@@ -561,6 +580,7 @@ func Test_nodeMetricInformer_collectNodeAggregateMetric(t *testing.T) {
 			result.EXPECT().TimeRangeDuration().Return(end.Sub(start)).AnyTimes()
 			mockResultFactory.EXPECT().New(gomock.Any()).Return(result).AnyTimes()
 			mockQuerier.EXPECT().Query(gomock.Any(), gomock.Any(), gomock.Any()).SetArg(2, *result).Return(nil).AnyTimes()
+			mockQuerier.EXPECT().Close().AnyTimes()
 			r := &nodeMetricInformer{
 				metricCache: mockMetricCache,
 				nodeMetric: &slov1alpha1.NodeMetric{
@@ -583,6 +603,7 @@ func Test_nodeMetricInformer_collectNodeAggregateMetric(t *testing.T) {
 				AggregatedNodeUsages: []slov1alpha1.AggregatedUsage{
 					{
 						Usage: map[apiext.AggregationType]slov1alpha1.ResourceMap{
+							apiext.AVG: tt.fields.nodeResultAVG,
 							apiext.P50: tt.fields.nodeResultP50,
 							apiext.P90: tt.fields.nodeResultP90,
 							apiext.P95: tt.fields.nodeResultP95,
@@ -703,6 +724,7 @@ func Test_nodeMetricInformer_NewAndSetup(t *testing.T) {
 					metricCache: mockmetriccache.NewMockMetricCache(ctrl),
 					informerPlugins: map[PluginName]informerPlugin{
 						podsInformerName:    NewPodsInformer(),
+						nodeInformerName:    NewNodeInformer(),
 						nodeSLOInformerName: NewNodeSLOInformer(),
 					},
 				},
@@ -738,7 +760,9 @@ func Test_metricsInColdStart(t *testing.T) {
 		{
 			name: "metric in cold start",
 			args: args{
-				duration: queryEnd.Sub(shortStart),
+				queryStart: queryStart,
+				queryEnd:   queryEnd,
+				duration:   queryEnd.Sub(shortStart),
 			},
 			want: true,
 		},
@@ -1132,6 +1156,8 @@ func buildMockQueryResult(ctrl *gomock.Controller, querier *mockmetriccache.Mock
 	result.EXPECT().TimeRangeDuration().Return(duration).AnyTimes()
 	factory.EXPECT().New(queryMeta).Return(result).AnyTimes()
 	querier.EXPECT().Query(queryMeta, gomock.Any(), result).SetArg(2, *result).Return(nil).AnyTimes()
+	querier.EXPECT().QueryAndClose(queryMeta, gomock.Any(), result).SetArg(2, *result).Return(nil).AnyTimes()
+	querier.EXPECT().Close().AnyTimes()
 }
 
 func Test_nodeMetricInformer_collectSystemAggregateMetric(t *testing.T) {
@@ -1204,6 +1230,7 @@ func Test_nodeMetricInformer_collectSystemAggregateMetric(t *testing.T) {
 			result.EXPECT().TimeRangeDuration().Return(end.Sub(start)).AnyTimes()
 			mockResultFactory.EXPECT().New(gomock.Any()).Return(result).AnyTimes()
 			mockQuerier.EXPECT().Query(gomock.Any(), gomock.Any(), gomock.Any()).SetArg(2, *result).Return(nil).AnyTimes()
+			mockQuerier.EXPECT().Close().AnyTimes()
 			r := &nodeMetricInformer{
 				metricCache: mockMetricCache,
 				nodeMetric: &slov1alpha1.NodeMetric{
@@ -1225,6 +1252,7 @@ func Test_nodeMetricInformer_collectSystemAggregateMetric(t *testing.T) {
 				AggregatedNodeUsages: []slov1alpha1.AggregatedUsage{
 					{
 						Usage: map[apiext.AggregationType]slov1alpha1.ResourceMap{
+							apiext.AVG: tt.fields.sysResultAVG,
 							apiext.P50: tt.fields.sysResultP50,
 							apiext.P90: tt.fields.sysResultP90,
 							apiext.P95: tt.fields.sysResultP95,
@@ -1464,6 +1492,67 @@ func Test_nodeMetricInformer_collectHostAppMetric(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("collectHostAppMetric() got = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func Test_nodeMetricInformer_generateQueryDuration(t *testing.T) {
+	testNow := time.Now()
+	timeNow = func() time.Time {
+		return testNow
+	}
+	type fields struct {
+		nodeMetric *slov1alpha1.NodeMetric
+	}
+	tests := []struct {
+		name      string
+		fields    fields
+		wantStart time.Time
+		wantEnd   time.Time
+	}{
+		{
+			name: "collect policy is nil",
+			fields: fields{
+				nodeMetric: &slov1alpha1.NodeMetric{},
+			},
+			wantStart: timeNow().Add(-time.Second * defaultAggregateDurationSeconds),
+			wantEnd:   timeNow(),
+		},
+		{
+			name: "aggregate duration is nil",
+			fields: fields{
+				nodeMetric: &slov1alpha1.NodeMetric{
+					Spec: slov1alpha1.NodeMetricSpec{
+						CollectPolicy: &slov1alpha1.NodeMetricCollectPolicy{},
+					},
+				},
+			},
+			wantStart: timeNow().Add(-time.Second * defaultAggregateDurationSeconds),
+			wantEnd:   timeNow(),
+		},
+		{
+			name: "aggregate duration is not nil",
+			fields: fields{
+				nodeMetric: &slov1alpha1.NodeMetric{
+					Spec: slov1alpha1.NodeMetricSpec{
+						CollectPolicy: &slov1alpha1.NodeMetricCollectPolicy{
+							AggregateDurationSeconds: pointer.Int64(1200),
+						},
+					},
+				},
+			},
+			wantStart: timeNow().Add(-time.Second * 1200),
+			wantEnd:   timeNow(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &nodeMetricInformer{
+				nodeMetric: tt.fields.nodeMetric,
+			}
+			gotStart, gotEnd := r.generateQueryDuration()
+			assert.Equalf(t, tt.wantStart, gotStart, "generateQueryDuration()")
+			assert.Equalf(t, tt.wantEnd, gotEnd, "generateQueryDuration()")
 		})
 	}
 }

@@ -7,39 +7,38 @@ import (
 )
 
 type GangSummary struct {
-	Name                     string         `json:"name"`
-	WaitTime                 time.Duration  `json:"waitTime"`
-	CreateTime               time.Time      `json:"createTime"`
-	Mode                     string         `json:"mode"`
-	GangMatchPolicy          string         `json:"gangMatchPolicy"`
-	MinRequiredNumber        int            `json:"minRequiredNumber"`
-	TotalChildrenNum         int            `json:"totalChildrenNum"`
-	GangGroup                []string       `json:"gangGroup"`
-	Children                 sets.String    `json:"children"`
-	WaitingForBindChildren   sets.String    `json:"waitingForBindChildren"`
-	BoundChildren            sets.String    `json:"boundChildren"`
-	OnceResourceSatisfied    bool           `json:"onceResourceSatisfied"`
-	ScheduleCycleValid       bool           `json:"scheduleCycleValid"`
-	ScheduleCycle            int            `json:"scheduleCycle"`
-	ChildrenScheduleRoundMap map[string]int `json:"childrenScheduleRoundMap"`
-	GangFrom                 string         `json:"gangFrom"`
-	HasGangInit              bool           `json:"hasGangInit"`
+	Name                   string           `json:"name"`
+	WaitTime               time.Duration    `json:"waitTime"`
+	CreateTime             time.Time        `json:"createTime"`
+	Mode                   string           `json:"mode"`
+	GangMatchPolicy        string           `json:"gangMatchPolicy"`
+	MinRequiredNumber      int              `json:"minRequiredNumber"`
+	TotalChildrenNum       int              `json:"totalChildrenNum"`
+	GangGroup              []string         `json:"gangGroup"`
+	Children               sets.Set[string] `json:"children"`
+	PendingChildren        sets.Set[string] `json:"pendingChildren"`
+	WaitingForBindChildren sets.Set[string] `json:"waitingForBindChildren"`
+	BoundChildren          sets.Set[string] `json:"boundChildren"`
+	OnceResourceSatisfied  bool             `json:"onceResourceSatisfied"`
+	GangGroupInfo          *GangGroupInfo   `json:"gangGroupInfo"`
+	GangFrom               string           `json:"gangFrom"`
+	HasGangInit            bool             `json:"hasGangInit"`
 }
 
 func (gang *Gang) GetGangSummary() *GangSummary {
 	gangSummary := &GangSummary{
-		Children:                 sets.NewString(),
-		WaitingForBindChildren:   sets.NewString(),
-		BoundChildren:            sets.NewString(),
-		ChildrenScheduleRoundMap: make(map[string]int),
+		Children:               sets.New[string](),
+		PendingChildren:        sets.New[string](),
+		WaitingForBindChildren: sets.New[string](),
+		BoundChildren:          sets.New[string](),
 	}
 
 	if gang == nil {
 		return gangSummary
 	}
 
-	gang.lock.Lock()
-	defer gang.lock.Unlock()
+	gang.lock.RLock()
+	defer gang.lock.RUnlock()
 
 	gangSummary.Name = gang.Name
 	gangSummary.WaitTime = gang.WaitTime
@@ -48,9 +47,8 @@ func (gang *Gang) GetGangSummary() *GangSummary {
 	gangSummary.GangMatchPolicy = gang.GangMatchPolicy
 	gangSummary.MinRequiredNumber = gang.MinRequiredNumber
 	gangSummary.TotalChildrenNum = gang.TotalChildrenNum
-	gangSummary.OnceResourceSatisfied = gang.OnceResourceSatisfied
-	gangSummary.ScheduleCycleValid = gang.ScheduleCycleValid
-	gangSummary.ScheduleCycle = gang.ScheduleCycle
+	gangSummary.OnceResourceSatisfied = gang.GangGroupInfo.isGangOnceResourceSatisfied()
+	gangSummary.GangGroupInfo = gang.GangGroupInfo
 	gangSummary.GangFrom = gang.GangFrom
 	gangSummary.HasGangInit = gang.HasGangInit
 	gangSummary.GangGroup = append(gangSummary.GangGroup, gang.GangGroup...)
@@ -58,14 +56,14 @@ func (gang *Gang) GetGangSummary() *GangSummary {
 	for podName := range gang.Children {
 		gangSummary.Children.Insert(podName)
 	}
+	for podName := range gang.PendingChildren {
+		gangSummary.PendingChildren.Insert(podName)
+	}
 	for podName := range gang.WaitingForBindChildren {
 		gangSummary.WaitingForBindChildren.Insert(podName)
 	}
 	for podName := range gang.BoundChildren {
 		gangSummary.BoundChildren.Insert(podName)
-	}
-	for key, value := range gang.ChildrenScheduleRoundMap {
-		gangSummary.ChildrenScheduleRoundMap[key] = value
 	}
 
 	return gangSummary

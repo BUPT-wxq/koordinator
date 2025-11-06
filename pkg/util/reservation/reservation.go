@@ -19,6 +19,9 @@ package reservation
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	quotav1 "k8s.io/apiserver/pkg/quota/v1"
+	corev1helper "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/v1/resource"
@@ -37,7 +41,7 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/util"
 )
 
-var (
+const (
 	// AnnotationReservePod indicates whether the pod is a reserved pod.
 	AnnotationReservePod = extension.SchedulingDomainPrefix + "/reserve-pod"
 	// AnnotationReservationName indicates the name of the reservation.
@@ -46,7 +50,12 @@ var (
 	AnnotationReservationNode = extension.SchedulingDomainPrefix + "/reservation-node"
 	// AnnotationReservationResizeAllocatable indicates the desired allocatable are to be updated.
 	AnnotationReservationResizeAllocatable = extension.SchedulingDomainPrefix + "/reservation-resize-allocatable"
+	// AnnotationIsPreAllocation indicates whether the pod is a reserve pod and enables the pre-allocation.
+	AnnotationIsPreAllocation = extension.SchedulingDomainPrefix + "/is-pre-allocation"
 )
+
+// ErrReasonPrefix is the prefix of the reservation-level scheduling errors.
+const ErrReasonPrefix = "Reservation(s) "
 
 // NewReservePod returns a fake pod set as the reservation's specifications.
 // The reserve pod is only visible for the scheduler and does not make actual creation on nodes.
@@ -82,6 +91,11 @@ func NewReservePod(r *schedulingv1alpha1.Reservation) *corev1.Pod {
 	reservePod.Annotations[AnnotationReservePod] = "true"
 	reservePod.Annotations[AnnotationReservationName] = r.Name // for search inversely
 
+	// annotate the pre-allocation info
+	if r.Spec.PreAllocation {
+		reservePod.Annotations[AnnotationIsPreAllocation] = "true"
+	}
+
 	// annotate node name specified
 	if len(reservePod.Spec.NodeName) > 0 {
 		// if the reservation specifies a nodeName, annotate it and cleanup spec.nodeName for other plugins not
@@ -95,8 +109,19 @@ func NewReservePod(r *schedulingv1alpha1.Reservation) *corev1.Pod {
 	}
 
 	if reservePod.Spec.Priority == nil {
-		reservePod.Spec.Priority = pointer.Int32(0)
+		if priorityVal, ok := r.Labels[extension.LabelPodPriority]; ok && priorityVal != "" {
+			priority, err := strconv.ParseInt(priorityVal, 10, 32)
+			if err == nil {
+				reservePod.Spec.Priority = pointer.Int32(int32(priority))
+			}
+		}
 	}
+
+	if reservePod.Spec.Priority == nil {
+		// Forces priority to be set to maximum to prevent preemption.
+		reservePod.Spec.Priority = pointer.Int32(math.MaxInt32)
+	}
+
 	reservePod.Spec.SchedulerName = GetReservationSchedulerName(r)
 
 	if IsReservationSucceeded(r) {
@@ -105,7 +130,7 @@ func NewReservePod(r *schedulingv1alpha1.Reservation) *corev1.Pod {
 		reservePod.Status.Phase = corev1.PodFailed
 	}
 	if IsReservationAvailable(r) {
-		podRequests, _ := resource.PodRequestsAndLimits(reservePod)
+		podRequests := resource.PodRequests(reservePod, resource.PodResourcesOptions{})
 		if !quotav1.Equals(podRequests, r.Status.Allocatable) {
 			//
 			// PodRequests is different from r.Status.Allocatable,
@@ -120,7 +145,7 @@ func NewReservePod(r *schedulingv1alpha1.Reservation) *corev1.Pod {
 
 func UpdateReservePodWithAllocatable(reservePod *corev1.Pod, podRequests, allocatable corev1.ResourceList) {
 	if podRequests == nil {
-		podRequests, _ = resource.PodRequestsAndLimits(reservePod)
+		podRequests = resource.PodRequests(reservePod, resource.PodResourcesOptions{})
 	} else {
 		podRequests = podRequests.DeepCopy()
 	}
@@ -239,6 +264,36 @@ func GetReservationNodeName(r *schedulingv1alpha1.Reservation) string {
 	return r.Status.NodeName
 }
 
+func SetReservationUnschedulable(r *schedulingv1alpha1.Reservation, msg string) {
+	// unschedule reservations can try scheduling in next cycles, so we does not update its phase
+	// not duplicate condition info
+	idx := -1
+	isScheduled := false
+	for i, condition := range r.Status.Conditions {
+		if condition.Type == schedulingv1alpha1.ReservationConditionScheduled {
+			idx = i
+			isScheduled = condition.Status == schedulingv1alpha1.ConditionStatusTrue
+		}
+	}
+	if idx < 0 { // if not set condition
+		condition := schedulingv1alpha1.ReservationCondition{
+			Type:               schedulingv1alpha1.ReservationConditionScheduled,
+			Status:             schedulingv1alpha1.ConditionStatusFalse,
+			Reason:             schedulingv1alpha1.ReasonReservationUnschedulable,
+			Message:            msg,
+			LastProbeTime:      metav1.Now(),
+			LastTransitionTime: metav1.Now(),
+		}
+		r.Status.Conditions = append(r.Status.Conditions, condition)
+	} else if isScheduled { // if is scheduled, keep the condition status
+		r.Status.Conditions[idx].LastProbeTime = metav1.Now()
+	} else { // if already unschedulable, update the message
+		r.Status.Conditions[idx].Reason = schedulingv1alpha1.ReasonReservationUnschedulable
+		r.Status.Conditions[idx].Message = msg
+		r.Status.Conditions[idx].LastProbeTime = metav1.Now()
+	}
+}
+
 func SetReservationExpired(r *schedulingv1alpha1.Reservation) {
 	r.Status.Phase = schedulingv1alpha1.ReservationFailed
 	// not duplicate expired info
@@ -331,14 +386,18 @@ func SetReservationAvailable(r *schedulingv1alpha1.Reservation, nodeName string)
 	return nil
 }
 
+func IsReservePodPreAllocation(pod *corev1.Pod) bool {
+	return pod != nil && pod.Annotations != nil && pod.Annotations[AnnotationIsPreAllocation] == "true"
+}
+
 func ReservationRequests(r *schedulingv1alpha1.Reservation) corev1.ResourceList {
 	if IsReservationAvailable(r) {
 		return r.Status.Allocatable.DeepCopy()
 	}
 	if r.Spec.Template != nil {
-		requests, _ := resource.PodRequestsAndLimits(&corev1.Pod{
+		requests := resource.PodRequests(&corev1.Pod{
 			Spec: r.Spec.Template.Spec,
-		})
+		}, resource.PodResourcesOptions{})
 		return requests
 	}
 	return nil
@@ -389,7 +448,7 @@ func ParseReservationOwnerMatchers(owners []schedulingv1alpha1.ReservationOwner)
 func (m *ReservationOwnerMatcher) Match(pod *corev1.Pod) bool {
 	if MatchObjectRef(pod, m.Object) &&
 		MatchReservationControllerReference(pod, m.Controller) &&
-		(m.Selector == nil || m.Selector.Matches(labels.Set(pod.Labels))) {
+		MatchLabels(pod.Labels, m.Selector) {
 		return true
 	}
 	return false
@@ -441,9 +500,18 @@ func MatchReservationControllerReference(pod *corev1.Pod, controllerRef *schedul
 	return false
 }
 
+func MatchLabels(podLabels map[string]string, selector labels.Selector) bool {
+	if selector == nil {
+		return true
+	}
+	return selector.Matches(labels.Set(podLabels))
+}
+
 type RequiredReservationAffinity struct {
 	labelSelector labels.Selector
 	nodeSelector  *nodeaffinity.NodeSelector
+	tolerations   []corev1.Toleration
+	name          string
 }
 
 // GetRequiredReservationAffinity returns the parsing result of pod's nodeSelector and nodeAffinity.
@@ -452,7 +520,7 @@ func GetRequiredReservationAffinity(pod *corev1.Pod) (*RequiredReservationAffini
 	if err != nil {
 		return nil, err
 	}
-	if len(reservationAffinity.ReservationSelector) == 0 && reservationAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+	if reservationAffinity == nil {
 		return nil, nil
 	}
 	var selector labels.Selector
@@ -469,12 +537,40 @@ func GetRequiredReservationAffinity(pod *corev1.Pod) (*RequiredReservationAffini
 			return nil, err
 		}
 	}
-	return &RequiredReservationAffinity{labelSelector: selector, nodeSelector: affinity}, nil
+	return &RequiredReservationAffinity{
+		labelSelector: selector,
+		nodeSelector:  affinity,
+		tolerations:   reservationAffinity.Tolerations,
+		name:          reservationAffinity.Name,
+	}, nil
+}
+
+// GetName returns the reservation name if it is specified in the reservation affinity.
+func (s *RequiredReservationAffinity) GetName() string {
+	if s == nil {
+		return ""
+	}
+	return s.name
+}
+
+// MatchName checks if the reservation affinity specifies a reservation name, and it matches the given reservation's.
+func (s *RequiredReservationAffinity) MatchName(reservationName string) bool {
+	return s != nil && len(s.name) > 0 && s.name == reservationName
 }
 
 // Match checks whether the pod is schedulable onto nodes according to
 // the requirements in both nodeSelector and nodeAffinity.
+// DEPRECATED: use MatchAffinity instead.
 func (s *RequiredReservationAffinity) Match(node *corev1.Node) bool {
+	return s.MatchAffinity(node)
+}
+
+// MatchAffinity checks whether the pod is schedulable onto nodes according to
+// the requirements in both nodeSelector and nodeAffinity.
+func (s *RequiredReservationAffinity) MatchAffinity(node *corev1.Node) bool {
+	if s == nil {
+		return true
+	}
 	if s.labelSelector != nil {
 		if !s.labelSelector.Matches(labels.Set(node.Labels)) {
 			return false
@@ -484,6 +580,15 @@ func (s *RequiredReservationAffinity) Match(node *corev1.Node) bool {
 		return s.nodeSelector.Match(node)
 	}
 	return true
+}
+
+// FindMatchingUntoleratedTaint checks if the reservation tolerations tolerates all the filtered reservation taints.
+// It returns the first taint without a toleration and the status if any taint is NOT tolerated.
+func (s *RequiredReservationAffinity) FindMatchingUntoleratedTaint(taints []corev1.Taint, inclusionFilter func(*corev1.Taint) bool) (corev1.Taint, bool) {
+	if s == nil {
+		return corev1.Taint{}, false
+	}
+	return corev1helper.FindMatchingUntoleratedTaint(taints, s.tolerations, inclusionFilter)
 }
 
 type ReservationResizeAllocatable struct {
@@ -527,4 +632,42 @@ func UpdateReservationResizeAllocatable(obj metav1.Object, resources corev1.Reso
 		resizeAllocatable.Resources[resourceName] = quantity
 	}
 	return SetReservationResizeAllocatable(obj, resizeAllocatable)
+}
+
+func GetReservationRestrictedResources(allocatableResources []corev1.ResourceName, options *extension.ReservationRestrictedOptions) []corev1.ResourceName {
+	if options == nil {
+		return allocatableResources
+	}
+	result := make([]corev1.ResourceName, 0, len(allocatableResources))
+	for _, resourceName := range allocatableResources {
+		for _, v := range options.Resources {
+			if resourceName == v {
+				result = append(result, resourceName)
+				break
+			}
+		}
+	}
+	if len(result) == 0 {
+		result = allocatableResources
+	}
+	return result
+}
+
+// NewReservationReason creates a reservation-level error reason with the given message.
+func NewReservationReason(fmtMsg string, args ...interface{}) string {
+	if len(args) <= 0 {
+		return ErrReasonPrefix + fmtMsg
+	}
+	return fmt.Sprintf(ErrReasonPrefix+fmtMsg, args...)
+}
+
+// IsReservationReason checks if the error reason is at the reservation-level.
+func IsReservationReason(reason string) bool {
+	return strings.HasPrefix(reason, ErrReasonPrefix)
+}
+
+// DoNotScheduleTaintsFilter can filter out the node taints that reject scheduling Pod on a Node.
+func DoNotScheduleTaintsFilter(t *corev1.Taint) bool {
+	// PodToleratesNodeTaints is only interested in NoSchedule and NoExecute taints.
+	return t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute
 }

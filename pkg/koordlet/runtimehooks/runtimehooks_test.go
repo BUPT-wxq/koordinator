@@ -17,12 +17,14 @@ limitations under the License.
 package runtimehooks
 
 import (
-	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/koordinator-sh/koordinator/pkg/features"
 	mockstatesinformer "github.com/koordinator-sh/koordinator/pkg/koordlet/statesinformer/mockstatesinformer"
@@ -68,7 +70,7 @@ func Test_runtimeHook_Run(t *testing.T) {
 			fields: fields{
 				config: &Config{
 					RuntimeHooksNetwork:             "unix",
-					RuntimeHooksAddr:                path.Join(tmpDir, "kooordlet.sock"),
+					RuntimeHooksAddr:                filepath.Join(tmpDir, "kooordlet.sock"),
 					RuntimeHooksFailurePolicy:       "Fail",
 					RuntimeHooksPluginFailurePolicy: "Ignore",
 					RuntimeHookDisableStages:        []string{"PreRunPodSandbox"},
@@ -91,7 +93,7 @@ func Test_runtimeHook_Run(t *testing.T) {
 			fields: fields{
 				config: &Config{
 					RuntimeHooksNetwork:             "unix",
-					RuntimeHooksAddr:                path.Join(tmpDir, "kooordlet.sock"),
+					RuntimeHooksAddr:                filepath.Join(tmpDir, "kooordlet.sock"),
 					RuntimeHooksFailurePolicy:       "Fail",
 					RuntimeHooksPluginFailurePolicy: "Ignore",
 					RuntimeHookDisableStages:        []string{"PreRunPodSandbox"},
@@ -116,7 +118,10 @@ func Test_runtimeHook_Run(t *testing.T) {
 			defer ctrl.Finish()
 			si := mockstatesinformer.NewMockStatesInformer(ctrl)
 			si.EXPECT().RegisterCallbacks(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-			r, err := NewRuntimeHook(si, tt.fields.config)
+			scheme := apiruntime.NewScheme()
+			kubeClient := &kubernetes.Clientset{}
+			nodeName := "test-node"
+			r, err := NewRuntimeHook(si, tt.fields.config, scheme, kubeClient, nodeName)
 			assert.NoError(t, err)
 			stop := make(chan struct{})
 

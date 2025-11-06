@@ -150,6 +150,24 @@ func readCgroupAndParseInt64(parentDir string, r sysutil.Resource) (int64, error
 	return v, nil
 }
 
+func readCgroupAndParseUint32(parentDir string, r sysutil.Resource) (uint32, error) {
+	// TODO: refactor with generics
+	s, err := cgroupFileRead(parentDir, r)
+	if err != nil {
+		return 0, err
+	}
+
+	// "max" means unlimited
+	if strings.Trim(s, "\n ") == CgroupMaxSymbolStr {
+		return math.MaxInt32, nil
+	}
+	v, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("cannot parse cgroup value %s, err: %v", s, err)
+	}
+	return uint32(v), nil
+}
+
 func readCgroupAndParseUint64(parentDir string, r sysutil.Resource) (uint64, error) {
 	s, err := cgroupFileRead(parentDir, r)
 	if err != nil {
@@ -170,6 +188,7 @@ func readCgroupAndParseUint64(parentDir string, r sysutil.Resource) (uint64, err
 
 // ReadCgroupAndParseInt32Slice reads the given cgroup content and parses it into an int32 slice.
 // e.g. content: "1\n23\n0\n4\n56789" -> []int32{ 1, 23, 0, 4, 56789 }
+// TODO: refactor via Generics.
 func readCgroupAndParseInt32Slice(parentDir string, r sysutil.Resource) ([]int32, error) {
 	s, err := cgroupFileRead(parentDir, r)
 	if err != nil {

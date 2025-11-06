@@ -19,7 +19,8 @@ package system
 import (
 	"io"
 	"os"
-	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -32,7 +33,7 @@ var (
 )
 
 func CommonFileRead(file string) (string, error) {
-	file = path.Join(CommonRootDir, file)
+	file = filepath.Join(CommonRootDir, file)
 	klog.V(5).Infof("read %s", file)
 	data, err := os.ReadFile(file)
 	return strings.Trim(string(data), "\n"), err
@@ -54,7 +55,7 @@ func CommonFileWriteIfDifferent(file string, value string) (bool, error) {
 }
 
 func CommonFileWrite(file string, data string) error {
-	file = path.Join(CommonRootDir, file)
+	file = filepath.Join(CommonRootDir, file)
 	klog.V(5).Infof("write %s [%s]", file, data)
 	return os.WriteFile(file, []byte(data), 0644)
 }
@@ -108,4 +109,21 @@ func ParseKVMap(content string) map[string]string {
 		m[lineItems[0]] = lineItems[1]
 	}
 	return m
+}
+
+// GoWithNewThread synchronously runs the function in a new goroutine bound to a new OS thread.
+func GoWithNewThread(f func() interface{}) interface{} {
+	// Lock the thread of the caller goroutine to ensure the thread does not change outside the new goroutine.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	retCh := make(chan interface{})
+	go func() {
+		// When the calling goroutine exits without unlocking the thread, the thread will be terminated.
+		// It helps the function to lock with an individual thread so not to affect the caller goroutine.
+		runtime.LockOSThread()
+		ret := f()
+		retCh <- ret
+	}()
+	ret := <-retCh
+	return ret
 }

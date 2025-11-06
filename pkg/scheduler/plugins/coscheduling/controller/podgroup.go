@@ -18,13 +18,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
-
-	"context"
-	"reflect"
 
 	v1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
@@ -37,11 +36,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	schedv1alpha1 "sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
-	schedclientset "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned"
-	schedinformer "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
-	schedlister "sigs.k8s.io/scheduler-plugins/pkg/generated/listers/scheduling/v1alpha1"
 
+	schedv1alpha1 "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
+	schedclientset "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/clientset/versioned"
+	schedinformer "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
+	schedlister "github.com/koordinator-sh/koordinator/apis/thirdparty/scheduler-plugins/pkg/generated/listers/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/core"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
 )
@@ -155,7 +154,7 @@ func (ctrl *PodGroupController) podAdded(obj interface{}) {
 	}
 	pg, err := ctrl.pgLister.PodGroups(pod.Namespace).Get(pgName)
 	if err != nil {
-		klog.Errorf("Error while adding pod, err: %v", err)
+		klog.V(5).ErrorS(err, "Error while adding pod", "pod", util.GetId(pod.Namespace, pod.Name))
 		return
 	}
 	klog.Infof("Add podGroup when pod gets added, podGroup: %v, pod: %v", util.GetId(pg.Namespace, pg.Name),
@@ -205,7 +204,7 @@ func (ctrl *PodGroupController) syncHandler(key string) error {
 		return nil
 	}
 	defer func() {
-		if err != nil {
+		if err != nil && !apierrs.IsNotFound(err) {
 			ctrl.pgQueue.AddRateLimited(key)
 			return
 		}
@@ -246,33 +245,38 @@ func (ctrl *PodGroupController) syncHandler(key string) error {
 			fillOccupiedObj(pgCopy, pods[0])
 		}
 	default:
-		var (
-			running   int32 = 0
-			succeeded int32 = 0
-			failed    int32 = 0
-		)
-		if len(pods) != 0 {
-			for _, pod := range pods {
-				switch pod.Status.Phase {
-				case v1.PodRunning:
-					running++
-				case v1.PodSucceeded:
-					succeeded++
-				case v1.PodFailed:
-					failed++
-				}
-			}
-		}
-		pgCopy.Status.Failed = failed
-		pgCopy.Status.Succeeded = succeeded
-		pgCopy.Status.Running = running
-
 		if len(pods) == 0 {
 			pgCopy.Status.Phase = schedv1alpha1.PodGroupPending
 			break
 		}
 
-		if pgCopy.Status.Scheduled >= pgCopy.Spec.MinMember && pgCopy.Status.Phase == schedv1alpha1.PodGroupScheduling {
+		var (
+			running   int32 = 0
+			succeeded int32 = 0
+			failed    int32 = 0
+		)
+
+		for _, pod := range pods {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				running++
+			case v1.PodSucceeded:
+				succeeded++
+			case v1.PodFailed:
+				failed++
+			}
+		}
+		pgCopy.Status.Failed = failed
+		pgCopy.Status.Succeeded = succeeded
+		pgCopy.Status.Running = running
+		pgCopy.Status.Scheduled = ctrl.pgManager.GetBoundPodNumber(util.GetId(pg.Namespace, pg.Name))
+
+		if pgCopy.Status.Scheduled < pgCopy.Spec.MinMember {
+			pgCopy.Status.Phase = schedv1alpha1.PodGroupScheduling
+			if pgCopy.Status.ScheduleStartTime.IsZero() {
+				pgCopy.Status.ScheduleStartTime = metav1.Time{Time: time.Now()}
+			}
+		} else {
 			pgCopy.Status.Phase = schedv1alpha1.PodGroupScheduled
 		}
 
@@ -311,14 +315,14 @@ func (ctrl *PodGroupController) patchPodGroup(old, new *schedv1alpha1.PodGroup) 
 }
 
 func fillOccupiedObj(pg *schedv1alpha1.PodGroup, pod *v1.Pod) {
+	if len(pod.OwnerReferences) == 0 {
+		return
+	}
 	var refs []string
 	for _, ownerRef := range pod.OwnerReferences {
 		refs = append(refs, fmt.Sprintf("%s/%s", pod.Namespace, ownerRef.Name))
 	}
-	if len(pg.Status.OccupiedBy) == 0 {
-		return
-	}
-	if len(refs) != 0 {
+	if len(refs) > 0 {
 		sort.Strings(refs)
 		pg.Status.OccupiedBy = strings.Join(refs, ",")
 	}

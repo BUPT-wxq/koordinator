@@ -2,7 +2,6 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  creationTimestamp: null
   name: mutating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
@@ -24,6 +23,27 @@ webhooks:
     - CREATE
     resources:
     - elasticquotas
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-node-status
+  failurePolicy: Ignore
+  name: mnode-status.koordinator.sh
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - nodes/status
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -65,11 +85,30 @@ webhooks:
     resources:
     - pods
   sideEffects: None
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-reservation
+  failurePolicy: Fail
+  name: mreservation-create.koordinator.sh
+  rules:
+  - apiGroups:
+    - scheduling.koordinator.sh
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    resources:
+    - reservations
+  sideEffects: None
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  creationTimestamp: null
   name: validating-webhook-configuration
 webhooks:
 - admissionReviewVersions:

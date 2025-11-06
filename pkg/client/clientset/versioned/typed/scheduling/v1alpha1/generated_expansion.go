@@ -18,8 +18,12 @@ limitations under the License.
 
 package v1alpha1
 
+type ClusterNetworkTopologyExpansion interface{}
+
 type DeviceExpansion interface{}
 
 type PodMigrationJobExpansion interface{}
 
 type ReservationExpansion interface{}
+
+type ScheduleExplanationExpansion interface{}

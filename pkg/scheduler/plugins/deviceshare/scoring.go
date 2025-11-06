@@ -28,7 +28,19 @@ import (
 
 	schedulerconfig "github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext/topologymanager"
 )
+
+func (p *Plugin) PreScore(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodes []*corev1.Node) *framework.Status {
+	state, status := getPreFilterState(cycleState)
+	if !status.IsSuccess() {
+		return status
+	}
+	if state.skip {
+		return framework.NewStatus(framework.Skip)
+	}
+	return nil
+}
 
 func (p *Plugin) Score(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeName string) (int64, *framework.Status) {
 	state, status := getPreFilterState(cycleState)
@@ -39,9 +51,26 @@ func (p *Plugin) Score(ctx context.Context, cycleState *framework.CycleState, po
 		return 0, nil
 	}
 
+	nodeInfo, err := p.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
+	if err != nil {
+		return 0, framework.AsStatus(err)
+	}
+
 	nodeDeviceInfo := p.nodeDeviceCache.getNodeDevice(nodeName, false)
 	if nodeDeviceInfo == nil {
 		return 0, nil
+	}
+
+	store := topologymanager.GetStore(cycleState)
+	affinity, _ := store.GetAffinity(nodeName)
+
+	allocator := &AutopilotAllocator{
+		state:      state,
+		nodeDevice: nodeDeviceInfo,
+		node:       nodeInfo.Node(),
+		pod:        pod,
+		scorer:     p.scorer,
+		numaNodes:  affinity.NUMANodeAffinity,
 	}
 
 	reservationRestoreState := getReservationRestoreState(cycleState)
@@ -51,9 +80,12 @@ func (p *Plugin) Score(ctx context.Context, cycleState *framework.CycleState, po
 	nodeDeviceInfo.lock.RLock()
 	defer nodeDeviceInfo.lock.RUnlock()
 
-	reservationInfo := frameworkext.GetNominatedReservation(cycleState, nodeName)
+	var reservationInfo *frameworkext.ReservationInfo
+	if reservationNominator := p.handle.GetReservationNominator(); reservationNominator != nil {
+		reservationInfo = reservationNominator.GetNominatedReservation(pod, nodeName)
+	}
 	if reservationInfo != nil {
-		score, status := p.scoreWithNominatedReservation(state, restoreState, nodeDeviceInfo, nodeName, pod, preemptible, reservationInfo)
+		score, status := p.scoreWithNominatedReservation(allocator, state, restoreState, nodeName, pod, preemptible, reservationInfo)
 		if status.IsSuccess() {
 			return score, nil
 		}
@@ -62,11 +94,10 @@ func (p *Plugin) Score(ctx context.Context, cycleState *framework.CycleState, po
 	}
 
 	preemptible = appendAllocated(preemptible, restoreState.mergedMatchedAllocatable)
-	score, err := nodeDeviceInfo.score(state.podRequests, nil, preemptible, p.scorer)
-	if err != nil {
-		klog.ErrorS(status.AsError(), "Failed to score of DeviceShare",
-			"pod", klog.KObj(pod), "reservation", klog.KObj(reservationInfo), "node", nodeName)
-		return 0, framework.AsStatus(err)
+	score, status := allocator.score(nil, preemptible)
+	if !status.IsSuccess() {
+		klog.ErrorS(status.AsError(), "Failed to score of DeviceShare", "pod", klog.KObj(pod), "node", nodeName)
+		return 0, status
 	}
 	return score, nil
 }
@@ -88,6 +119,11 @@ func (p *Plugin) ScoreReservation(ctx context.Context, cycleState *framework.Cyc
 		return 0, nil
 	}
 
+	nodeInfo, err := p.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
+	if err != nil {
+		return 0, framework.AsStatus(err)
+	}
+
 	reservationRestoreState := getReservationRestoreState(cycleState)
 	restoreState := reservationRestoreState.getNodeState(nodeName)
 
@@ -96,12 +132,24 @@ func (p *Plugin) ScoreReservation(ctx context.Context, cycleState *framework.Cyc
 		return 0, nil
 	}
 
+	store := topologymanager.GetStore(cycleState)
+	affinity, _ := store.GetAffinity(nodeInfo.Node().Name)
+
+	allocator := &AutopilotAllocator{
+		state:      state,
+		nodeDevice: nodeDeviceInfo,
+		node:       nodeInfo.Node(),
+		pod:        pod,
+		scorer:     p.scorer,
+		numaNodes:  affinity.NUMANodeAffinity,
+	}
+
 	preemptible := appendAllocated(nil, restoreState.mergedUnmatchedUsed, state.preemptibleDevices[nodeName])
 
 	nodeDeviceInfo.lock.RLock()
 	defer nodeDeviceInfo.lock.RUnlock()
 
-	return p.scoreWithNominatedReservation(state, restoreState, nodeDeviceInfo, nodeName, pod, preemptible, reservationInfo)
+	return p.scoreWithNominatedReservation(allocator, state, restoreState, nodeName, pod, preemptible, reservationInfo)
 }
 
 func (p *Plugin) ReservationScoreExtensions() frameworkext.ReservationScoreExtensions {

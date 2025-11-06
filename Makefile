@@ -13,9 +13,10 @@ KOORDLET_IMG ?= "${REG}/${REG_NS}/koordlet:${GIT_BRANCH}-${GIT_COMMIT_ID}"
 KOORD_MANAGER_IMG ?= "${REG}/${REG_NS}/koord-manager:${GIT_BRANCH}-${GIT_COMMIT_ID}"
 KOORD_SCHEDULER_IMG ?= "${REG}/${REG_NS}/koord-scheduler:${GIT_BRANCH}-${GIT_COMMIT_ID}"
 KOORD_DESCHEDULER_IMG ?= "${REG}/${REG_NS}/koord-descheduler:${GIT_BRANCH}-${GIT_COMMIT_ID}"
+KOORD_DEVICE_DAEMON_IMG ?= "${REG}/${REG_NS}/koord-device-daemon:${GIT_BRANCH}-${GIT_COMMIT_ID}"
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.22
+ENVTEST_K8S_VERSION = 1.28
 
 AGENT_MODE ?= hostMode
 # Set license header files.
@@ -36,6 +37,9 @@ endif
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
+
+LINT_TIMEOUT ?= 15m
+DOCKER_BUILDER ?= buildx build
 
 .PHONY: all
 all: build
@@ -62,7 +66,6 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	@hack/fix_crd_plural.sh
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -83,7 +86,7 @@ lint: lint-go lint-license ## Lint all code.
 
 .PHONY: lint-go
 lint-go: golangci-lint ## Lint Go code.
-	$(GOLANGCI_LINT) run -v --timeout=10m
+	$(GOLANGCI_LINT) run -v --timeout=$(LINT_TIMEOUT)
 
 .PHONY: lint-license
 lint-license:
@@ -91,7 +94,7 @@ lint-license:
 
 .PHONY: test
 test: manifests generate fmt vet envtest libpfm ## Run tests.
-	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" agent_mode=$(AGENT_MODE) go test $(PACKAGES) -race -covermode atomic -coverprofile cover.out 
+	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" agent_mode=$(AGENT_MODE) go test $(PACKAGES) -race -covermode atomic -coverprofile cover.out
 	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" agent_mode=$(AGENT_MODE) go test $(PERFGROUPPACKAGE) -covermode atomic -coverprofile tmp.out && cat tmp.out | tail -n +2 >> cover.out && rm tmp.out
 
 .PHONY: fast-test
@@ -102,7 +105,7 @@ fast-test: envtest libpfm ## Run tests fast.
 ##@ Build
 
 .PHONY: build
-build: build-koordlet build-koord-manager build-koord-scheduler build-koord-descheduler build-koord-runtime-proxy
+build: build-koordlet build-koord-manager build-koord-scheduler build-koord-descheduler build-koord-runtime-proxy build-koord-device-daemon
 
 .PHONY: build-koordlet
 build-koordlet: libpfm ## Build koordlet binary.
@@ -124,27 +127,34 @@ build-koord-descheduler: ## Build koord-descheduler binary.
 build-koord-runtime-proxy: ## Build koord-runtime-proxy binary.
 	go build -o bin/koord-runtime-proxy cmd/koord-runtime-proxy/main.go
 
+.PHONY: build-koord-device-daemon
+build-koord-device-daemon: ## Build koord-device-daemon binary.
+	go build -o bin/koord-device-daemon cmd/koord-device-daemon/main.go
+
 .PHONY: docker-build
-docker-build: test docker-build-koordlet docker-build-koord-manager docker-build-koord-scheduler docker-build-koord-descheduler
+docker-build: test docker-build-koordlet docker-build-koord-manager docker-build-koord-scheduler docker-build-koord-descheduler docker-build-koord-device-daemon
 
 .PHONY: docker-build-koordlet
 docker-build-koordlet: ## Build docker image with the koordlet.
-	docker build --pull -t ${KOORDLET_IMG} -f docker/koordlet.dockerfile .
+	docker ${DOCKER_BUILDER} ${DOCKER_BUILD_ARGS} --pull -t ${KOORDLET_IMG} -f docker/koordlet.dockerfile .
 
 .PHONY: docker-build-koord-manager
 docker-build-koord-manager: ## Build docker image with the koord-manager.
-	docker build --pull -t ${KOORD_MANAGER_IMG} -f docker/koord-manager.dockerfile .
+	docker $(DOCKER_BUILDER) ${DOCKER_BUILD_ARGS} --pull -t ${KOORD_MANAGER_IMG} -f docker/koord-manager.dockerfile .
 
 .PHONY: docker-build-koord-scheduler
 docker-build-koord-scheduler: ## Build docker image with the scheduler.
-	docker build --pull -t ${KOORD_SCHEDULER_IMG} -f docker/koord-scheduler.dockerfile .
+	docker $(DOCKER_BUILDER) ${DOCKER_BUILD_ARGS} --pull -t ${KOORD_SCHEDULER_IMG} -f docker/koord-scheduler.dockerfile .
 
 .PHONY: docker-build-koord-descheduler
 docker-build-koord-descheduler: ## Build docker image with the descheduler.
-	docker build --pull -t ${KOORD_DESCHEDULER_IMG} -f docker/koord-descheduler.dockerfile .
+	docker $(DOCKER_BUILDER) ${DOCKER_BUILD_ARGS} --pull -t ${KOORD_DESCHEDULER_IMG} -f docker/koord-descheduler.dockerfile .
 
+.PHONY: docker-build-koord-device-daemon
+docker-build-koord-device-daemon: ## Build docker image with the koord-device-daemon.
+	docker $(DOCKER_BUILDER) ${DOCKER_BUILD_ARGS} --pull -t ${KOORD_DEVICE_DAEMON_IMG} -f docker/koord-device-daemon.dockerfile .
 .PHONY: docker-push
-docker-push: docker-push-koordlet docker-push-koord-manager docker-push-koord-scheduler docker-push-koord-descheduler
+docker-push: docker-push-koordlet docker-push-koord-manager docker-push-koord-scheduler docker-push-koord-descheduler docker-push-koord-device-daemon
 
 .PHONY: docker-push-koordlet
 docker-push-koordlet: ## Push docker image with the koordlet.
@@ -174,6 +184,12 @@ ifneq ($(REG_USER), "")
 endif
 	docker push ${KOORD_DESCHEDULER_IMG}
 
+.PHONY: docker-push-koord-device-daemon
+docker-push-koord-device-daemon: ## Push docker image with the koord-device-daemon.
+ifneq ($(REG_USER), "")
+	docker login -u $(REG_USER) -p $(REG_PWD) ${REG}
+endif
+	docker push ${KOORD_DEVICE_DAEMON_IMG}
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -214,8 +230,8 @@ HACK_DIR ?= $(PWD)/hack
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v3.8.7
-CONTROLLER_TOOLS_VERSION ?= v0.9.0
-GOLANGCILINT_VERSION ?= v1.47.3
+CONTROLLER_TOOLS_VERSION ?= v0.14.0
+GOLANGCILINT_VERSION ?= v1.55.2
 GINKGO_VERSION ?= v1.16.4
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
@@ -245,5 +261,5 @@ $(GINKGO): $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install github.com/onsi/ginkgo/ginkgo@$(GINKGO_VERSION)
 
 .PHONY: libpfm
-libpfm: 
+libpfm:
 	@hack/libpfm.sh

@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"go.uber.org/atomic"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -35,18 +36,22 @@ var UseCgroupsV2 = atomic.NewBool(false)
 
 type Config struct {
 	CgroupRootDir         string
-	CgroupKubePath        string
 	SysRootDir            string
 	SysFSRootDir          string
 	ProcRootDir           string
 	VarRunRootDir         string
+	VarLibKubeletRootDir  string
 	RunRootDir            string
 	RuntimeHooksConfigDir string
 
-	ContainerdEndPoint string
-	PouchEndpoint      string
-	DockerEndPoint     string
-	DefaultRuntimeType string
+	ContainerdEndPoint           string
+	PouchEndpoint                string
+	DockerEndPoint               string
+	CrioEndPoint                 string
+	DefaultRuntimeType           string
+	HAMICoreLibraryDirectoryPath string
+	PodResourcesProxyPath        string
+	XPUDeviceInfosDir            string
 }
 
 func init() {
@@ -57,38 +62,59 @@ func init() {
 	}
 }
 
-func initSupportConfigs() {
+// InitSupportConfigs initializes the system support status.
+// e.g. the cgroup version, resctrl capability
+func InitSupportConfigs() {
+	// $ getconf CLK_TCK > jiffies
+	if err := initJiffies(); err != nil {
+		klog.Warningf("failed to get Jiffies, use the default %v, err: %v", Jiffies, err)
+	}
 	initCgroupsVersion()
 	HostSystemInfo = collectVersionInfo()
-	_, _ = IsSupportResctrl()
+	if isResctrlSupported, err := IsSupportResctrl(); err != nil {
+		klog.Warningf("failed to check resctrl support status, use %v, err: %v", isResctrlSupported, err)
+	} else {
+		klog.V(4).Infof("resctrl supported: %v", isResctrlSupported)
+	}
+	if isResctrlCollectorSupported, err := IsSupportResctrlCollector(); err != nil {
+		klog.Warningf("failed to check resctrl collector support status, use %v, err: %v", isResctrlCollectorSupported, err)
+	} else {
+		klog.V(4).Infof("resctrl collector supported: %v", isResctrlCollectorSupported)
+	}
 }
 
 func NewHostModeConfig() *Config {
 	return &Config{
-		CgroupKubePath:        "kubepods/",
-		CgroupRootDir:         "/sys/fs/cgroup/",
-		ProcRootDir:           "/proc/",
-		SysRootDir:            "/sys/",
-		SysFSRootDir:          "/sys/fs/",
-		VarRunRootDir:         "/var/run/",
-		RunRootDir:            "/run/",
-		RuntimeHooksConfigDir: "/etc/runtime/hookserver.d",
-		DefaultRuntimeType:    "containerd",
+		CgroupRootDir:                "/sys/fs/cgroup/",
+		ProcRootDir:                  "/proc/",
+		SysRootDir:                   "/sys/",
+		SysFSRootDir:                 "/sys/fs/",
+		VarRunRootDir:                "/var/run/",
+		VarLibKubeletRootDir:         "/var/lib/kubelet/",
+		RunRootDir:                   "/run/",
+		RuntimeHooksConfigDir:        "/etc/runtime/hookserver.d",
+		DefaultRuntimeType:           "containerd",
+		HAMICoreLibraryDirectoryPath: "/usr/local/vgpu/libvgpu.so",
+		PodResourcesProxyPath:        "/var/run/koordlet/pod-resources",
+		XPUDeviceInfosDir:            "/var/run/koordlet/xpu-device-infos/",
 	}
 }
 
 func NewDsModeConfig() *Config {
 	return &Config{
-		CgroupKubePath: "kubepods/",
-		CgroupRootDir:  "/host-cgroup/",
+		CgroupRootDir: "/host-cgroup/",
 		// some dirs are not covered by ns, or unused with `hostPID` is on
-		ProcRootDir:           "/proc/",
-		SysRootDir:            "/host-sys/",
-		SysFSRootDir:          "/host-sys-fs/",
-		VarRunRootDir:         "/host-var-run/",
-		RunRootDir:            "/host-run/",
-		RuntimeHooksConfigDir: "/host-etc-hookserver/",
-		DefaultRuntimeType:    "containerd",
+		ProcRootDir:                  "/proc/",
+		SysRootDir:                   "/host-sys/",
+		SysFSRootDir:                 "/host-sys-fs/",
+		VarRunRootDir:                "/host-var-run/",
+		VarLibKubeletRootDir:         "/var/lib/kubelet/",
+		RunRootDir:                   "/host-run/",
+		RuntimeHooksConfigDir:        "/host-etc-hookserver/",
+		DefaultRuntimeType:           "containerd",
+		HAMICoreLibraryDirectoryPath: "/usr/local/vgpu/libvgpu.so",
+		PodResourcesProxyPath:        "/var/run/koordlet/pod-resources",
+		XPUDeviceInfosDir:            "/var/run/koordlet/xpu-device-infos/",
 	}
 }
 
@@ -102,14 +128,17 @@ func (c *Config) InitFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.SysFSRootDir, "sys-fs-root-dir", c.SysFSRootDir, "host /sys/fs dir in container, used by resctrl fs")
 	fs.StringVar(&c.ProcRootDir, "proc-root-dir", c.ProcRootDir, "host /proc dir in container")
 	fs.StringVar(&c.VarRunRootDir, "var-run-root-dir", c.VarRunRootDir, "host /var/run dir in container")
+	fs.StringVar(&c.VarLibKubeletRootDir, "var-lib-kubelet-dir", c.VarLibKubeletRootDir, "host /var/lib/kubelet dir in container")
 	fs.StringVar(&c.RunRootDir, "run-root-dir", c.RunRootDir, "host /run dir in container")
 
-	fs.StringVar(&c.CgroupKubePath, "cgroup-kube-dir", c.CgroupKubePath, "Cgroup kube dir")
 	fs.StringVar(&c.ContainerdEndPoint, "containerd-endpoint", c.ContainerdEndPoint, "containerd endPoint")
 	fs.StringVar(&c.DockerEndPoint, "docker-endpoint", c.DockerEndPoint, "docker endPoint")
 	fs.StringVar(&c.PouchEndpoint, "pouch-endpoint", c.PouchEndpoint, "pouch endPoint")
 
 	fs.StringVar(&c.DefaultRuntimeType, "default-runtime-type", c.DefaultRuntimeType, "default runtime type during runtime hooks handle request, candidates are containerd/docker/pouch.")
+	fs.StringVar(&c.HAMICoreLibraryDirectoryPath, "hami-core-library-directory-path", c.HAMICoreLibraryDirectoryPath, "path of hami core library")
 
-	initSupportConfigs()
+	fs.StringVar(&c.PodResourcesProxyPath, "pod-resources-proxy-path", c.PodResourcesProxyPath, "The path of the socket file for the pod resource proxy")
+
+	fs.StringVar(&c.XPUDeviceInfosDir, "xpu-device-infos-dir", c.XPUDeviceInfosDir, "The directory where xpu device infos are stored, such as nvidia gpu, ascend npu, etc. Default: /var/run/koordlet/xpu-device-infos/")
 }

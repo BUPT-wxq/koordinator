@@ -19,8 +19,9 @@ package mutating
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math/rand"
+	"sort"
+	"strconv"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -85,6 +86,11 @@ func (h *PodMutatingHandler) clusterColocationProfileMutatingPod(ctx context.Con
 	if len(matchedProfiles) == 0 {
 		return nil
 	}
+
+	// sort the profile in lexicographic order
+	sort.Slice(matchedProfiles, func(i, j int) bool {
+		return matchedProfiles[i].Name < matchedProfiles[j].Name
+	})
 	skipUpdateResourceFromProfile := false
 	for _, profile := range matchedProfiles {
 		if extension.ShouldSkipUpdateResource(profile) {
@@ -173,6 +179,35 @@ func (h *PodMutatingHandler) doMutateByColocationProfile(ctx context.Context, po
 		}
 	}
 
+	if len(profile.Spec.LabelKeysMapping) > 0 {
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		for keyOld, keyNew := range profile.Spec.LabelKeysMapping {
+			pod.Labels[keyNew] = pod.Labels[keyOld]
+		}
+	}
+
+	if len(profile.Spec.AnnotationKeysMapping) > 0 {
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		for keyOld, keyNew := range profile.Spec.AnnotationKeysMapping {
+			pod.Annotations[keyNew] = pod.Annotations[keyOld]
+		}
+	}
+
+	if len(profile.Spec.LabelSuffixes) > 0 {
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		for key, suffix := range profile.Spec.LabelSuffixes {
+			if _, ok := pod.Labels[key]; ok {
+				pod.Labels[key] = pod.Labels[key] + suffix
+			}
+		}
+	}
+
 	if profile.Spec.SchedulerName != "" {
 		pod.Spec.SchedulerName = profile.Spec.SchedulerName
 	}
@@ -192,13 +227,14 @@ func (h *PodMutatingHandler) doMutateByColocationProfile(ctx context.Context, po
 		}
 		pod.Spec.PriorityClassName = profile.Spec.PriorityClassName
 		pod.Spec.Priority = pointer.Int32(priorityClass.Value)
+		pod.Spec.PreemptionPolicy = priorityClass.PreemptionPolicy
 	}
 
 	if profile.Spec.KoordinatorPriority != nil {
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
-		pod.Labels[extension.LabelPodPriority] = fmt.Sprintf("%d", *profile.Spec.KoordinatorPriority)
+		pod.Labels[extension.LabelPodPriority] = strconv.FormatInt(int64(*profile.Spec.KoordinatorPriority), 10)
 	}
 
 	if profile.Spec.Patch.Raw != nil {

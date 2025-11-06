@@ -22,14 +22,16 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/clock"
+	quotav1 "k8s.io/apiserver/pkg/quota/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
 	"github.com/koordinator-sh/koordinator/apis/configuration"
 	"github.com/koordinator-sh/koordinator/apis/extension"
 	slov1alpha1 "github.com/koordinator-sh/koordinator/apis/slo/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/slo-controller/metrics"
 	"github.com/koordinator-sh/koordinator/pkg/slo-controller/noderesource/framework"
+	resutil "github.com/koordinator-sh/koordinator/pkg/slo-controller/noderesource/plugins/util"
 	"github.com/koordinator-sh/koordinator/pkg/util"
 )
 
@@ -38,7 +40,7 @@ const PluginName = "MidResource"
 // ResourceNames defines the Mid-tier extended resource names to update.
 var ResourceNames = []corev1.ResourceName{extension.MidCPU, extension.MidMemory}
 
-var clk clock.Clock = clock.RealClock{} // for testing
+var clk clock.WithTickerAndDelayedExecution = clock.RealClock{} // for testing
 
 type Plugin struct{}
 
@@ -63,7 +65,7 @@ func (p *Plugin) NeedSync(strategy *configuration.ColocationStrategy, oldNode, n
 
 func (p *Plugin) Prepare(_ *configuration.ColocationStrategy, node *corev1.Node, nr *framework.NodeResource) error {
 	for _, resourceName := range ResourceNames {
-		prepareNodeForResource(node, nr, resourceName)
+		resutil.PrepareNodeForResource(node, nr, resourceName)
 	}
 	return nil
 }
@@ -90,7 +92,7 @@ func (p *Plugin) Calculate(strategy *configuration.ColocationStrategy, node *cor
 
 	// if the node metric is abnormal, do degraded calculation
 	if p.isDegradeNeeded(strategy, metrics.NodeMetric, node) {
-		klog.InfoS("node Mid-tier need degradation, reset node resources", "node", node.Name)
+		klog.V(5).InfoS("node Mid-tier need degradation, reset node resources", "node", node.Name)
 		return p.degradeCalculate(node,
 			"degrade node Mid resource because of abnormal nodeMetric, reason: degradedByMidResource"), nil
 	}
@@ -104,18 +106,18 @@ func (p *Plugin) isDegradeNeeded(strategy *configuration.ColocationStrategy, nod
 		return true
 	}
 
-	if nodeMetric.Status.ProdReclaimableMetric == nil ||
-		nodeMetric.Status.ProdReclaimableMetric.Resource.ResourceList == nil {
-		klog.V(4).Infof("need degradation for Mid-tier, err: nodeMetric %v has no valid prod reclaimable: %v",
-			nodeMetric.Name, nodeMetric.Status.ProdReclaimableMetric)
-		return true
-	}
-
 	now := clk.Now()
 	if now.After(nodeMetric.Status.UpdateTime.Add(time.Duration(*strategy.DegradeTimeMinutes) * time.Minute)) {
 		klog.V(4).Infof("need degradation for Mid-tier, err: timeout nodeMetric: %v, current timestamp: %v,"+
 			" metric last update timestamp: %v", nodeMetric.Name, now, nodeMetric.Status.UpdateTime)
 		return true
+	}
+
+	if nodeMetric.Status.ProdReclaimableMetric == nil ||
+		nodeMetric.Status.ProdReclaimableMetric.Resource.ResourceList == nil {
+		klog.V(4).Infof("need degradation for Mid-tier, err: nodeMetric %v has no valid prod reclaimable, set it to zero: %v",
+			nodeMetric.Name, nodeMetric.Status.ProdReclaimableMetric)
+		return false
 	}
 
 	return false
@@ -125,41 +127,85 @@ func (p *Plugin) degradeCalculate(node *corev1.Node, message string) []framework
 	return p.Reset(node, message)
 }
 
+// Unallocated[Mid] = max(NodeCapacity - NodeReserved - Allocated[Prod], 0)
+func (p *Plugin) getUnallocated(nodeName string, podList *corev1.PodList, nodeCapacity, nodeReserved corev1.ResourceList) corev1.ResourceList {
+	prodPodAllocated := corev1.ResourceList{}
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		priorityClass := extension.GetPodPriorityClassWithDefault(pod)
+		// If the pod is not marked as low priority, it is considered high priority
+		isHighPriority := priorityClass != extension.PriorityMid && priorityClass != extension.PriorityBatch && priorityClass != extension.PriorityFree
+		if !isHighPriority {
+			continue
+		}
+
+		if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
+			continue
+		}
+		podRequest := util.GetPodRequest(pod, corev1.ResourceCPU, corev1.ResourceMemory)
+		prodPodAllocated = quotav1.Add(prodPodAllocated, podRequest)
+	}
+
+	midUnallocated := quotav1.Max(quotav1.Subtract(quotav1.Subtract(nodeCapacity, nodeReserved), prodPodAllocated), util.NewZeroResourceList())
+	cpuMsg := fmt.Sprintf("midUnallocatedCPU[core]:%v = max(nodeCapacity:%v - nodeReserved:%v - prodPodAllocated:%v, 0)",
+		midUnallocated.Cpu(), nodeCapacity.Cpu(), nodeReserved.Cpu(), prodPodAllocated.Cpu())
+	memMsg := fmt.Sprintf("midUnallocatedMem[GB]:%v = max(nodeCapacity:%v - nodeReserved:%v - prodPodAllocated:%v, 0)",
+		midUnallocated.Memory().ScaledValue(resource.Giga), nodeCapacity.Memory().ScaledValue(resource.Giga),
+		nodeReserved.Memory().ScaledValue(resource.Giga), prodPodAllocated.Memory().ScaledValue(resource.Giga))
+
+	klog.V(6).Infof("calculated mid unallocated for node %s, cpu(core) %v, memory(GB) %v", nodeName, cpuMsg, memMsg)
+	return midUnallocated
+}
+
 func (p *Plugin) calculate(strategy *configuration.ColocationStrategy, node *corev1.Node, podList *corev1.PodList,
 	resourceMetrics *framework.ResourceMetrics) []framework.ResourceItem {
-	// MidAllocatable := min(NodeAllocatable * thresholdRatio, ProdReclaimable)
-	prodReclaimable := resourceMetrics.NodeMetric.Status.ProdReclaimableMetric.Resource
-	allocatableMilliCPU := prodReclaimable.Cpu().MilliValue()
-	allocatableMemory := prodReclaimable.Memory().Value()
+	// Allocatable[Mid]' := min(Reclaimable[Mid], NodeAllocatable * thresholdRatio, NodeUnused) + Unallocated[Mid] * midUnallocatedRatio
+	// Unallocated[Mid] = max(NodeCapacity - NodeReserved - Allocated[Prod], 0)
 
-	nodeAllocatable := node.Status.Allocatable
-	cpuThresholdRatio := 1.0
-	if strategy != nil && strategy.MidCPUThresholdPercent != nil {
-		cpuThresholdRatio = float64(*strategy.MidCPUThresholdPercent) / 100
-	}
-	if maxMilliCPU := float64(nodeAllocatable.Cpu().MilliValue()) * cpuThresholdRatio; allocatableMilliCPU > int64(maxMilliCPU) {
-		allocatableMilliCPU = int64(maxMilliCPU)
-	}
-	if allocatableMilliCPU < 0 {
-		klog.V(5).Infof("mid allocatable cpu of node %s is %v less than zero, set to zero",
-			node.Name, allocatableMilliCPU)
+	var allocatableMilliCPU, allocatableMemory int64
+	prodReclaimableCPU, prodReclaimableMemory := resource.NewQuantity(0, resource.DecimalSI), resource.NewQuantity(0, resource.BinarySI)
+	prodReclaimableMetric := resourceMetrics.NodeMetric.Status.ProdReclaimableMetric
+
+	if prodReclaimableMetric == nil || prodReclaimableMetric.Resource.ResourceList == nil {
+		klog.V(4).Infof("no valid prod reclaimable, so use default zero value")
 		allocatableMilliCPU = 0
-	}
-	cpuInMilliCores := resource.NewQuantity(allocatableMilliCPU, resource.DecimalSI)
-
-	memThresholdRatio := 1.0
-	if strategy != nil && strategy.MidMemoryThresholdPercent != nil {
-		memThresholdRatio = float64(*strategy.MidMemoryThresholdPercent) / 100
-	}
-	if maxMemory := float64(nodeAllocatable.Memory().Value()) * memThresholdRatio; allocatableMemory > int64(maxMemory) {
-		allocatableMemory = int64(maxMemory)
-	}
-	if allocatableMemory < 0 {
-		klog.V(5).Infof("mid allocatable memory of node %s is %v less than zero, set to zero",
-			node.Name, allocatableMemory)
 		allocatableMemory = 0
+	} else {
+		prodReclaimable := resourceMetrics.NodeMetric.Status.ProdReclaimableMetric.Resource
+		prodReclaimableCPU = prodReclaimable.Cpu()
+		prodReclaimableMemory = prodReclaimable.Memory()
+		allocatableMilliCPU = prodReclaimableCPU.MilliValue()
+		allocatableMemory = prodReclaimableMemory.Value()
 	}
-	memory := resource.NewQuantity(allocatableMemory, resource.BinarySI)
+
+	nodeMetric := resourceMetrics.NodeMetric
+
+	hostAppHPUsed := resutil.GetHostAppHPUsed(resourceMetrics, extension.PriorityMid)
+
+	nodeCapacity := resutil.GetNodeCapacity(node)
+
+	systemUsed := resutil.GetResourceListForCPUAndMemory(nodeMetric.Status.NodeMetric.SystemUsage.ResourceList)
+	// resource usage of host applications with prod priority will be count as host system usage since they consume the
+	// node reserved resource.
+	systemUsed = quotav1.Add(systemUsed, hostAppHPUsed)
+
+	// System.Reserved = Node.Anno.Reserved, Node.Kubelet.Reserved)
+	nodeAnnoReserved := util.GetNodeReservationFromAnnotation(node.Annotations)
+	nodeKubeletReserved := util.GetNodeReservationFromKubelet(node)
+	// FIXME: resource reservation taking max is rather confusing.
+	nodeReserved := quotav1.Max(nodeKubeletReserved, nodeAnnoReserved)
+	nodeReserved = quotav1.Max(systemUsed, nodeReserved)
+
+	unallocated := p.getUnallocated(node.Name, podList, nodeCapacity, nodeReserved)
+
+	nodeUnused, err := getNodeUnused(node, nodeMetric)
+	if err != nil {
+		// failed to get nodeUsage, so radically belief that there is no resource left
+		// to keep mid-resource calculations relatively strict
+		nodeUnused = corev1.ResourceList{}
+	}
+	cpuInMilliCores, memory, cpuMsg, memMsg := resutil.CalculateMidResourceByPolicy(strategy, nodeCapacity,
+		unallocated, nodeUnused, allocatableMilliCPU, allocatableMemory, prodReclaimableCPU, prodReclaimableMemory, node.Name)
 
 	metrics.RecordNodeExtendedResourceAllocatableInternal(node, string(extension.MidCPU), metrics.UnitInteger, float64(cpuInMilliCores.MilliValue())/1000)
 	metrics.RecordNodeExtendedResourceAllocatableInternal(node, string(extension.MidMemory), metrics.UnitByte, float64(memory.Value()))
@@ -170,29 +216,23 @@ func (p *Plugin) calculate(strategy *configuration.ColocationStrategy, node *cor
 		{
 			Name:     extension.MidCPU,
 			Quantity: cpuInMilliCores, // in milli-cores
-			Message: fmt.Sprintf("midAllocatable[CPU(milli-core)]:%v = min(nodeAllocatable:%v * thresholdRatio:%v, ProdReclaimable:%v)",
-				cpuInMilliCores.Value(), nodeAllocatable.Cpu().MilliValue(), cpuThresholdRatio, prodReclaimable.Cpu().MilliValue()),
+			Message:  cpuMsg,
 		},
 		{
 			Name:     extension.MidMemory,
 			Quantity: memory,
-			Message: fmt.Sprintf("midAllocatable[Memory(byte)]:%s = min(nodeAllocatable:%s * thresholdRatio:%v, ProdReclaimable:%s)",
-				memory.String(), nodeAllocatable.Memory().String(), memThresholdRatio, prodReclaimable.Memory().String()),
+			Message:  memMsg,
 		},
 	}
 }
 
-func prepareNodeForResource(node *corev1.Node, nr *framework.NodeResource, name corev1.ResourceName) {
-	if q := nr.Resources[name]; nr.Resets[name] || q == nil {
-		delete(node.Status.Capacity, name)
-		delete(node.Status.Allocatable, name)
+func getNodeUnused(node *corev1.Node, nodeMetrics *slov1alpha1.NodeMetric) (corev1.ResourceList, error) {
+	// nodeCapacity - nodeUsed
+	nodeCapacity := resutil.GetNodeCapacity(node)
+	nodeUsed := nodeMetrics.Status.NodeMetric.NodeUsage.ResourceList
+	if isValid, mes := resutil.IsValidNodeUsage(nodeMetrics); isValid {
+		return quotav1.Subtract(nodeCapacity, nodeUsed), nil
 	} else {
-		if _, ok := q.AsInt64(); !ok {
-			klog.V(4).InfoS("node mid resource's quantity is not int64 and will be rounded",
-				"node", node.Name, "resource", name, "original", *q, "rounded", q.Value())
-			q.Set(q.Value())
-		}
-		node.Status.Capacity[name] = *q
-		node.Status.Allocatable[name] = *q
+		return nil, fmt.Errorf("invalid node usage: %v", mes)
 	}
 }

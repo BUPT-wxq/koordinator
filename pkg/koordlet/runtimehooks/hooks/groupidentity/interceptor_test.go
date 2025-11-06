@@ -25,6 +25,7 @@ import (
 
 	ext "github.com/koordinator-sh/koordinator/apis/extension"
 	runtimeapi "github.com/koordinator-sh/koordinator/apis/runtime/v1alpha1"
+	slov1alpha1 "github.com/koordinator-sh/koordinator/apis/slo/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/resourceexecutor"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/runtimehooks/protocol"
 	"github.com/koordinator-sh/koordinator/pkg/koordlet/util"
@@ -68,6 +69,24 @@ func Test_bvtPlugin_SetPodBvtValue_Proxy(t *testing.T) {
 			corev1.PodQOSBestEffort: 0,
 		},
 	}
+	testRule1 := &bvtRule{
+		enable: true,
+		podQOSParams: map[ext.QoSClass]int64{
+			ext.QoSLSR: 0,
+			ext.QoSLS:  0,
+			ext.QoSBE:  -1,
+		},
+		kubeQOSDirParams: map[corev1.PodQOSClass]int64{
+			corev1.PodQOSGuaranteed: 0,
+			corev1.PodQOSBurstable:  0,
+			corev1.PodQOSBestEffort: -1,
+		},
+		kubeQOSPodParams: map[corev1.PodQOSClass]int64{
+			corev1.PodQOSGuaranteed: 0,
+			corev1.PodQOSBurstable:  0,
+			corev1.PodQOSBestEffort: -1,
+		},
+	}
 	type fields struct {
 		rule                         *bvtRule
 		systemSupported              *bool
@@ -105,6 +124,51 @@ func Test_bvtPlugin_SetPodBvtValue_Proxy(t *testing.T) {
 			},
 			want: want{
 				bvtValue: pointer.Int64(2),
+			},
+		},
+		{
+			name: "set ls pod bvt with annoation override succeed",
+			fields: fields{
+				rule:            defaultRule,
+				systemSupported: pointer.Bool(true),
+			},
+			args: args{
+				request: &runtimeapi.PodSandboxHookRequest{
+					Labels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSLS),
+					},
+					Annotations: map[string]string{
+						slov1alpha1.AnnotationPodCPUQoS: `{"enable":true,"groupIdentity":-1}`,
+					},
+					CgroupParent: "kubepods/pod-guaranteed-test-uid/",
+				},
+				response: &runtimeapi.PodSandboxHookResponse{},
+			},
+			want: want{
+				bvtValue: pointer.Int64(-1),
+			},
+		},
+		{
+			name: "set ls pod bvt with annoation override failed",
+			fields: fields{
+				rule:            defaultRule,
+				systemSupported: pointer.Bool(true),
+			},
+			args: args{
+				request: &runtimeapi.PodSandboxHookRequest{
+					Labels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSLS),
+					},
+					Annotations: map[string]string{
+						slov1alpha1.AnnotationPodCPUQoS: `{"enable":false}`,
+					},
+					CgroupParent: "kubepods/pod-guaranteed-test-uid/",
+				},
+				response: &runtimeapi.PodSandboxHookResponse{},
+			},
+			want: want{
+				// default value
+				bvtValue: pointer.Int64(0),
 			},
 		},
 		{
@@ -186,12 +250,31 @@ func Test_bvtPlugin_SetPodBvtValue_Proxy(t *testing.T) {
 			},
 		},
 		{
-			name: "set guaranteed bvt none while kernel sysctl changed",
+			name: "no need to set guaranteed bvt none while kernel sysctl disabled",
 			fields: fields{
 				rule:                         noneRule,
 				systemSupported:              pointer.Bool(true),
 				initKernelGroupIdentity:      true,
 				initKernelGroupIdentityValue: 0,
+			},
+			args: args{
+				request: &runtimeapi.PodSandboxHookRequest{
+					Labels: map[string]string{
+						ext.LabelPodQoS: string(ext.QoSLS),
+					},
+					CgroupParent: "kubepods/pod-guaranteed-test-uid/",
+				},
+				response: &runtimeapi.PodSandboxHookResponse{},
+			},
+			want: want{},
+		},
+		{
+			name: "set guaranteed bvt none while kernel sysctl changed",
+			fields: fields{
+				rule:                         testRule1,
+				systemSupported:              pointer.Bool(true),
+				initKernelGroupIdentity:      true,
+				initKernelGroupIdentityValue: 1,
 			},
 			args: args{
 				request: &runtimeapi.PodSandboxHookRequest{
@@ -320,6 +403,24 @@ func Test_bvtPlugin_SetKubeQOSBvtValue_Reconciler(t *testing.T) {
 			corev1.PodQOSBestEffort: 0,
 		},
 	}
+	testRule := &bvtRule{
+		enable: true,
+		podQOSParams: map[ext.QoSClass]int64{
+			ext.QoSLSR: 0,
+			ext.QoSLS:  0,
+			ext.QoSBE:  -1,
+		},
+		kubeQOSDirParams: map[corev1.PodQOSClass]int64{
+			corev1.PodQOSGuaranteed: 0,
+			corev1.PodQOSBurstable:  0,
+			corev1.PodQOSBestEffort: -1,
+		},
+		kubeQOSPodParams: map[corev1.PodQOSClass]int64{
+			corev1.PodQOSGuaranteed: 0,
+			corev1.PodQOSBurstable:  0,
+			corev1.PodQOSBestEffort: -1,
+		},
+	}
 	type fields struct {
 		rule                         *bvtRule
 		sysSupported                 *bool
@@ -420,12 +521,25 @@ func Test_bvtPlugin_SetKubeQOSBvtValue_Reconciler(t *testing.T) {
 			},
 		},
 		{
-			name: "set guaranteed bvt none while kernel sysctl changed",
+			name: "no need to set guaranteed bvt none while kernel sysctl disabled",
 			fields: fields{
 				rule:                         noneRule,
 				sysSupported:                 pointer.Bool(true),
 				initKernelGroupIdentity:      true,
 				initKernelGroupIdentityValue: 0,
+			},
+			args: args{
+				kubeQOS: corev1.PodQOSGuaranteed,
+			},
+			want: want{},
+		},
+		{
+			name: "set guaranteed bvt none while kernel sysctl changed",
+			fields: fields{
+				rule:                         testRule,
+				sysSupported:                 pointer.Bool(true),
+				initKernelGroupIdentity:      true,
+				initKernelGroupIdentityValue: 1,
 			},
 			args: args{
 				kubeQOS: corev1.PodQOSGuaranteed,
@@ -506,9 +620,8 @@ func Test_bvtPlugin_SetHostAppBvtValue(t *testing.T) {
 		},
 	}
 	type fields struct {
-		rule          *bvtRule
-		sysSupported  *bool
-		kernelEnabled *bool
+		rule         *bvtRule
+		sysSupported *bool
 	}
 	type args struct {
 		qos ext.QoSClass
@@ -523,9 +636,8 @@ func Test_bvtPlugin_SetHostAppBvtValue(t *testing.T) {
 		{
 			name: "set bvt value for ls host application",
 			fields: fields{
-				rule:          defaultRule,
-				sysSupported:  pointer.Bool(true),
-				kernelEnabled: pointer.Bool(true),
+				rule:         defaultRule,
+				sysSupported: pointer.Bool(true),
 			},
 			args: args{
 				qos: ext.QoSLS,
@@ -536,9 +648,8 @@ func Test_bvtPlugin_SetHostAppBvtValue(t *testing.T) {
 		{
 			name: "set bvt value for none host application",
 			fields: fields{
-				rule:          defaultRule,
-				sysSupported:  pointer.Bool(true),
-				kernelEnabled: pointer.Bool(true),
+				rule:         defaultRule,
+				sysSupported: pointer.Bool(true),
 			},
 			args: args{
 				qos: ext.QoSNone,
@@ -550,9 +661,8 @@ func Test_bvtPlugin_SetHostAppBvtValue(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &bvtPlugin{
-				rule:          tt.fields.rule,
-				sysSupported:  tt.fields.sysSupported,
-				kernelEnabled: tt.fields.kernelEnabled,
+				rule:         tt.fields.rule,
+				sysSupported: tt.fields.sysSupported,
 			}
 
 			ctx := &protocol.HostAppContext{}

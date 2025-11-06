@@ -19,7 +19,6 @@ package reservation
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,27 +29,6 @@ import (
 	schedulinglister "github.com/koordinator-sh/koordinator/pkg/client/listers/scheduling/v1alpha1"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 )
-
-// TODO(joseph): Considering the amount of changed code,
-// temporarily use global variable to store ReservationCache instance,
-// and then refactor to separate ReservationCache later.
-var theReservationCache atomic.Value
-
-type ReservationCache interface {
-	DeleteReservation(r *schedulingv1alpha1.Reservation) *frameworkext.ReservationInfo
-}
-
-func GetReservationCache() ReservationCache {
-	cache, _ := theReservationCache.Load().(ReservationCache)
-	if cache == nil {
-		return nil
-	}
-	return cache
-}
-
-func SetReservationCache(cache ReservationCache) {
-	theReservationCache.Store(cache)
-}
 
 type reservationCache struct {
 	reservationLister  schedulinglister.ReservationLister
@@ -233,7 +211,19 @@ func (cache *reservationCache) getReservationInfoByUID(uid types.UID) *framework
 	return nil
 }
 
-func (cache *reservationCache) forEachAvailableReservationOnNode(nodeName string, fn func(rInfo *frameworkext.ReservationInfo) *framework.Status) *framework.Status {
+func (cache *reservationCache) GetReservationInfoByPod(pod *corev1.Pod, nodeName string) *frameworkext.ReservationInfo {
+	var target *frameworkext.ReservationInfo
+	cache.forEachAvailableReservationOnNode(nodeName, func(rInfo *frameworkext.ReservationInfo) (bool, *framework.Status) {
+		if _, ok := rInfo.AssignedPods[pod.UID]; ok {
+			target = rInfo
+			return false, nil
+		}
+		return true, nil
+	})
+	return target
+}
+
+func (cache *reservationCache) forEachAvailableReservationOnNode(nodeName string, fn func(rInfo *frameworkext.ReservationInfo) (bool, *framework.Status)) *framework.Status {
 	cache.lock.RLock()
 	defer cache.lock.RUnlock()
 	rOnNode := cache.reservationsOnNode[nodeName]
@@ -243,8 +233,12 @@ func (cache *reservationCache) forEachAvailableReservationOnNode(nodeName string
 	for uid := range rOnNode {
 		rInfo := cache.reservationInfos[uid]
 		if rInfo != nil && rInfo.IsAvailable() {
-			if status := fn(rInfo); !status.IsSuccess() {
+			beContinue, status := fn(rInfo)
+			if !status.IsSuccess() {
 				return status
+			}
+			if !beContinue {
+				return nil
 			}
 		}
 	}
@@ -253,9 +247,9 @@ func (cache *reservationCache) forEachAvailableReservationOnNode(nodeName string
 
 func (cache *reservationCache) listAvailableReservationInfosOnNode(nodeName string) []*frameworkext.ReservationInfo {
 	var result []*frameworkext.ReservationInfo
-	cache.forEachAvailableReservationOnNode(nodeName, func(rInfo *frameworkext.ReservationInfo) *framework.Status {
+	cache.forEachAvailableReservationOnNode(nodeName, func(rInfo *frameworkext.ReservationInfo) (bool, *framework.Status) {
 		result = append(result, rInfo.Clone())
-		return nil
+		return true, nil
 	})
 	return result
 }

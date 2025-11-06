@@ -24,13 +24,18 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	_ "k8s.io/component-base/metrics/prometheus/clientgo" // load restclient and workqueue metrics
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/klogr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/koordinator-sh/koordinator/cmd/koord-manager/extensions"
 	"github.com/koordinator-sh/koordinator/cmd/koord-manager/options"
@@ -39,9 +44,11 @@ import (
 	utilclient "github.com/koordinator-sh/koordinator/pkg/util/client"
 	utilfeature "github.com/koordinator-sh/koordinator/pkg/util/feature"
 	"github.com/koordinator-sh/koordinator/pkg/util/fieldindex"
-	_ "github.com/koordinator-sh/koordinator/pkg/util/metrics/leadership"
+	metricsutil "github.com/koordinator-sh/koordinator/pkg/util/metrics"
+	kmmetrics "github.com/koordinator-sh/koordinator/pkg/util/metrics/koordmanager"
 	"github.com/koordinator-sh/koordinator/pkg/util/sloconfig"
 	"github.com/koordinator-sh/koordinator/pkg/webhook"
+	podvalidating "github.com/koordinator-sh/koordinator/pkg/webhook/pod/validating"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -65,8 +72,8 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true, "Whether you need to enable leader election.")
 	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "koordinator-system",
 		"This determines the namespace in which the leader election configmap will be created, it will use in-cluster namespace if empty.")
-	flag.StringVar(&leaderElectResourceLock, "leader-elect-resource-lock", resourcelock.ConfigMapsLeasesResourceLock,
-		"The leader election resource lock for controller manager. e.g. 'leases', 'configmaps', 'endpoints', 'endpointsleases', 'configmapsleases'")
+	flag.StringVar(&leaderElectResourceLock, "leader-elect-resource-lock", resourcelock.LeasesResourceLock,
+		"The leader election resource lock for controller manager. e.g. 'leases', 'configmaps', 'endpoints', 'endpointsleases'")
 	flag.StringVar(&namespace, "namespace", "",
 		"Namespace if specified restricts the manager's cache to watch objects in the desired namespace. Defaults to all namespaces.")
 	flag.BoolVar(&enablePprof, "enable-pprof", true, "Enable pprof for controller manager.")
@@ -75,6 +82,7 @@ func main() {
 	opts := options.NewOptions()
 	opts.InitFlags(flag.CommandLine)
 	sloconfig.InitFlags(flag.CommandLine)
+	podvalidating.InitFlags(flag.CommandLine)
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
@@ -111,18 +119,33 @@ func main() {
 			syncPeriod = &d
 		}
 	}
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+
+	mgrOpt := ctrl.Options{
 		Scheme:                     options.Scheme,
-		MetricsBindAddress:         metricsAddr,
+		Metrics:                    metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress:     healthProbeAddr,
 		LeaderElection:             enableLeaderElection,
 		LeaderElectionID:           "koordinator-manager",
 		LeaderElectionNamespace:    leaderElectionNamespace,
 		LeaderElectionResourceLock: leaderElectResourceLock,
-		Namespace:                  namespace,
-		SyncPeriod:                 syncPeriod,
+		Cache:                      cache.Options{SyncPeriod: syncPeriod},
 		NewClient:                  utilclient.NewClient,
-	})
+	}
+
+	if namespace != "" {
+		mgrOpt.Cache.DefaultNamespaces = map[string]cache.Config{}
+		mgrOpt.Cache.DefaultNamespaces[namespace] = cache.Config{}
+	}
+
+	installMetricsHandler(&mgrOpt)
+	ctx := ctrl.SetupSignalHandler()
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.WebhookFramework) {
+		setupLog.Info("setup webhook opt")
+		webhook.SetupWithWebhookOpt(&mgrOpt)
+	}
+
+	mgr, err := ctrl.NewManager(cfg, mgrOpt)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -141,8 +164,6 @@ func main() {
 
 	extensions.PrepareExtensions(cfg, mgr)
 	// +kubebuilder:scaffold:builder
-
-	ctx := ctrl.SetupSignalHandler()
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.WebhookFramework) {
 		setupLog.Info("setup webhook")
@@ -184,5 +205,19 @@ func setRestConfig(c *rest.Config) {
 	}
 	if *restConfigBurst > 0 {
 		c.Burst = *restConfigBurst
+	}
+}
+
+func installMetricsHandler(mgr *ctrl.Options) {
+	if mgr.Metrics.ExtraHandlers == nil {
+		mgr.Metrics.ExtraHandlers = map[string]http.Handler{}
+	}
+	for path, handler := range map[string]http.Handler{
+		kmmetrics.InternalHTTPPath: promhttp.HandlerFor(kmmetrics.InternalRegistry, promhttp.HandlerOpts{}),
+		kmmetrics.ExternalHTTPPath: promhttp.HandlerFor(kmmetrics.ExternalRegistry, promhttp.HandlerOpts{}),
+		kmmetrics.DefaultHTTPPath: promhttp.HandlerFor(
+			metricsutil.MergedGatherFunc(kmmetrics.InternalRegistry, kmmetrics.ExternalRegistry, ctrlmetrics.Registry), promhttp.HandlerOpts{}),
+	} {
+		mgr.Metrics.ExtraHandlers[path] = handler
 	}
 }

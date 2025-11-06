@@ -23,9 +23,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -36,6 +36,7 @@ import (
 	"unicode"
 
 	"github.com/cakturk/go-netstat/netstat"
+	"github.com/vishvananda/netlink"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/klog/v2"
 )
@@ -96,7 +97,7 @@ func KubeletPortToPid(port int) (int, error) {
 
 // CmdLine returns the command line args of a process.
 func ProcCmdLine(procRoot string, pid int) ([]string, error) {
-	data, err := ReadFileNoStat(path.Join(procRoot, strconv.Itoa(pid), "cmdline"))
+	data, err := ReadFileNoStat(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +196,7 @@ func execCmdOnHostFn(cmds []string) ([]byte, int, error) {
 	}
 	cmdPrefix := []string{}
 	if AgentMode == DS_MODE {
-		cmdPrefix = append(cmdPrefix, "nsenter", fmt.Sprintf("--mount=%s", path.Join(Conf.ProcRootDir, "/1/ns/mnt")))
+		cmdPrefix = append(cmdPrefix, "nsenter", fmt.Sprintf("--mount=%s", filepath.Join(Conf.ProcRootDir, "/1/ns/mnt")))
 	}
 	cmdPrefix = append(cmdPrefix, cmds...)
 
@@ -221,4 +222,21 @@ func WorkingDirOf(pid int) (string, error) {
 		tokens := strings.Split(string(out), ":")
 		return strings.TrimSpace(tokens[1]), nil
 	}
+}
+
+func GetLinkInfoByDefaultRoute() (netlink.Link, error) {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{}, netlink.RT_FILTER_DST)
+	if err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("not find route info by dst ip=%s", net.IPv4zero.String())
+	}
+
+	linkInfo, err := netlink.LinkByIndex(routes[0].LinkIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	return linkInfo, nil
 }
